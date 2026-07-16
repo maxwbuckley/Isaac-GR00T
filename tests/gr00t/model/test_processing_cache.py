@@ -76,14 +76,18 @@ class _StubVLMProcessor:
 
             def __call__(self, images=None, return_tensors="pt"):
                 stub.counters["image_processor"] += 1
+                # Accept both PIL images (training / legacy paths) and raw HWC
+                # numpy frames (inference fast path), like the real Qwen3VL
+                # image processor does.
+                arrays = [np.asarray(img) for img in images]
                 pixel_values = torch.stack(
                     [
-                        torch.from_numpy(np.asarray(img)[::32, ::32].astype(np.float32).reshape(-1))
-                        for img in images
+                        torch.from_numpy(arr[::32, ::32].astype(np.float32).reshape(-1))
+                        for arr in arrays
                     ]
                 )
                 grid = torch.tensor(
-                    [[1, img.height // 32, img.width // 32] for img in images],
+                    [[1, arr.shape[0] // 32, arr.shape[1] // 32] for arr in arrays],
                     dtype=torch.long,
                 )
                 return BatchFeature(data={"pixel_values": pixel_values, "image_grid_thw": grid})
