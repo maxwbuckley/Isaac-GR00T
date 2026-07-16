@@ -359,7 +359,23 @@ class Qwen3Backbone(torch.nn.Module):
         # 0. Set frozen module to eval
         keys_to_use = ["input_ids", "attention_mask", "pixel_values", "image_grid_thw"]
         vl_input = {k: vl_input[k] for k in keys_to_use}
-        outputs = self.model(**vl_input, output_hidden_states=True)
+        # We only consume hidden states, never logits or a KV cache, so skip the
+        # wasted work while keeping ``hidden_states[-1]`` bitwise identical:
+        # - ``logits_to_keep=1`` shrinks the lm_head projection from the full
+        #   [B, S, vocab] (~152k vocab) to [B, 1, vocab]. Hidden states are
+        #   captured at the decoder layers (``_can_record_outputs``) before the
+        #   lm_head slice, so ``hidden_states[-1]`` stays the PRE-final-norm
+        #   output of the last kept decoder layer (the DiT contract; see
+        #   scripts/deployment/export_onnx_n1d7.py "No final norm!").
+        # - ``use_cache=False`` skips the unused KV ``DynamicCache`` allocation;
+        #   the cache is pure storage during prefill and never feeds back into
+        #   the hidden states.
+        outputs = self.model(
+            **vl_input,
+            output_hidden_states=True,
+            use_cache=False,
+            logits_to_keep=1,
+        )
         outputs = outputs.hidden_states[-1]
         image_mask = vl_input["input_ids"] == self.model.config.image_token_id
         attention_mask = vl_input["attention_mask"] == 1
