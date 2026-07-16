@@ -1,0 +1,56 @@
+{
+  "baseline_b32": {
+    "flags": [
+      "--global_batch_size",
+      "32"
+    ],
+    "returncode": 1,
+    "oom": false,
+    "peak_gpu_mib": 32166,
+    "wall_seconds": 84.49199821599177,
+    "stderr_tail": "^^^^^\n  File \"/home/maxwb/venvs/isaac-gr00t/lib/python3.12/site-packages/torch/optim/optimizer.py\", line 517, in wrapper\n    out = func(*args, **kwargs)\n          ^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/maxwb/venvs/isaac-gr00t/lib/python3.12/site-packages/torch/optim/optimizer.py\", line 82, in _use_grad\n    ret = func(*args, **kwargs)\n          ^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/maxwb/venvs/isaac-gr00t/lib/python3.12/site-packages/torch/optim/adam.py\", line 247, in step\n    adam(\n  File \"/home/maxwb/venvs/isaac-gr00t/lib/python3.12/site-packages/torch/optim/optimizer.py\", line 150, in maybe_fallback\n    return func(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/maxwb/venvs/isaac-gr00t/lib/python3.12/site-packages/torch/optim/adam.py\", line 953, in adam\n    func(\n  File \"/home/maxwb/venvs/isaac-gr00t/lib/python3.12/site-packages/torch/optim/adam.py\", line 777, in _multi_tensor_adam\n    exp_avg_sq_sqrt = torch._foreach_sqrt(device_exp_avg_sqs)\n                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntorch.AcceleratorError: CUDA error: out of memory\nSearch for `cudaErrorMemoryAllocation' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.\nCUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.\nFor debugging consider passing CUDA_LAUNCH_BLOCKING=1\nCompile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.\n\n\n  0%|          | 0/8 [00:54<?, ?it/s]\n"
+  },
+  "accum_b8x4": {
+    "flags": [
+      "--global_batch_size",
+      "8",
+      "--gradient_accumulation_steps",
+      "4"
+    ],
+    "returncode": 1,
+    "oom": false,
+    "peak_gpu_mib": 32165,
+    "wall_seconds": 103.79883491700457,
+    "stderr_tail": "m_items_in_batch)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/maxwb/venvs/isaac-gr00t/lib/python3.12/site-packages/transformers/trainer.py\", line 4071, in training_step\n    self.accelerator.backward(loss, **kwargs)\n  File \"/home/maxwb/venvs/isaac-gr00t/lib/python3.12/site-packages/accelerate/accelerator.py\", line 2838, in backward\n    loss.backward(**kwargs)\n  File \"/home/maxwb/venvs/isaac-gr00t/lib/python3.12/site-packages/torch/_tensor.py\", line 625, in backward\n    torch.autograd.backward(\n  File \"/home/maxwb/venvs/isaac-gr00t/lib/python3.12/site-packages/torch/autograd/__init__.py\", line 354, in backward\n    _engine_run_backward(\n  File \"/home/maxwb/venvs/isaac-gr00t/lib/python3.12/site-packages/torch/autograd/graph.py\", line 841, in _engine_run_backward\n    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntorch.AcceleratorError: CUDA error: out of memory\nSearch for `cudaErrorMemoryAllocation' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.\nCUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.\nFor debugging consider passing CUDA_LAUNCH_BLOCKING=1\nCompile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.\n\n\n 12%|\u2588\u258e        | 1/8 [01:16<08:52, 76.02s/it]\n"
+  },
+  "accum_bf16": {
+    "flags": [
+      "--global_batch_size",
+      "8",
+      "--gradient_accumulation_steps",
+      "4",
+      "--load-bf16"
+    ],
+    "returncode": 0,
+    "oom": false,
+    "peak_gpu_mib": 32166,
+    "wall_seconds": 287.3578615820006,
+    "stderr_tail": ""
+  },
+  "accum_bf16_adam8bit": {
+    "flags": [
+      "--global_batch_size",
+      "8",
+      "--gradient_accumulation_steps",
+      "4",
+      "--load-bf16",
+      "--optim",
+      "paged_adamw_8bit"
+    ],
+    "returncode": 0,
+    "oom": false,
+    "peak_gpu_mib": 22163,
+    "wall_seconds": 100.30786573099613,
+    "stderr_tail": ""
+  }
+}
