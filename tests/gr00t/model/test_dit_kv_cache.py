@@ -339,6 +339,7 @@ def test_cached_kv_has_no_grad_and_processor_hit_counts():
     show one miss (first step) plus one hit per remaining step."""
     torch.manual_seed(7)
     config = _make_small_config(num_inference_timesteps=4)
+    config.use_dit_kv_cache = True  # cache behavior under test; default is off
     model = _build_model(config)
     action_head = model.action_head
     inputs = _make_inputs(config, batch_size=1)
