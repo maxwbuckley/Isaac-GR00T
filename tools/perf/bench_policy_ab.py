@@ -62,7 +62,7 @@ def build_observation(policy, snapshot_dir: str, batch_size: int, instruction: s
         state[key] = np.tile(mean, (batch_size, t, 1))
 
     language_key = policy.language_key
-    language = {language_key: np.array([[instruction]] * batch_size, dtype=object)}
+    language = {language_key: [[instruction]] * batch_size}
     return {"video": video, "state": state, "language": language}
 
 
@@ -129,7 +129,7 @@ def main():
     # Parity artifact: seeded action output (identical initial-noise draw across
     # variants -> bitwise-comparable outputs when the fixes are truly no-diff).
     torch.manual_seed(4242)
-    parity_action = policy.get_action(obs)
+    parity_action, _info = policy.get_action(obs)
     np.savez(
         args.output.replace(".json", "_parity.npz"),
         **{k: np.asarray(v) for k, v in parity_action.items()},
