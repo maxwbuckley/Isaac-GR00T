@@ -1,0 +1,27 @@
+{
+  "variant": "droid-bf16",
+  "quantize": null,
+  "dataset": "demo_data/droid_sample",
+  "embodiment_tag": "oxe_droid_relative_eef_relative_joint",
+  "seed": 7777,
+  "execution_horizon": 16,
+  "trajectories": {
+    "0": {
+      "mse": 0.04022972867623071,
+      "mae": 0.13107472400516176,
+      "steps": 167
+    },
+    "1": {
+      "mse": 0.005913022022734167,
+      "mae": 0.04883868471320859,
+      "steps": 200
+    },
+    "2": {
+      "mse": 0.07173689911109361,
+      "mae": 0.15509753773729137,
+      "steps": 200
+    }
+  },
+  "overall_mse": 0.039238710609693264,
+  "overall_mae": 0.11054095837559437
+}

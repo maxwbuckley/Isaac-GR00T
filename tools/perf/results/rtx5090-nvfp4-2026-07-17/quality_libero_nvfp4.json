@@ -1,0 +1,40 @@
+{
+  "variant": "libero-nvfp4",
+  "quantize": "nvfp4",
+  "dataset": "demo_data/libero_demo",
+  "embodiment_tag": "libero_sim",
+  "seed": 7777,
+  "execution_horizon": 8,
+  "trajectories": {
+    "0": {
+      "mse": 0.0005871960311196744,
+      "mae": 0.012050628662109375,
+      "steps": 200
+    },
+    "1": {
+      "mse": 0.001370557933114469,
+      "mae": 0.014363141730427742,
+      "steps": 200
+    },
+    "2": {
+      "mse": 0.0005943289725109935,
+      "mae": 0.012877640314400196,
+      "steps": 200
+    },
+    "3": {
+      "mse": 0.0021712835878133774,
+      "mae": 0.016215361654758453,
+      "steps": 200
+    },
+    "4": {
+      "mse": 0.00252784276381135,
+      "mae": 0.014331079088151455,
+      "steps": 200
+    }
+  },
+  "quantization_plan_counts": {
+    "nvfp4": 360
+  },
+  "overall_mse": 0.0014502417761832476,
+  "overall_mae": 0.013967570848762989
+}

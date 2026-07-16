@@ -1,0 +1,31 @@
+{
+  "variant": "droid-recipe-eb6.0_recipe",
+  "quantize": "/home/maxwb/gr00t_bench/nvfp4/droid_auto_eb6.0_recipe.json",
+  "dataset": "demo_data/droid_sample",
+  "embodiment_tag": "oxe_droid_relative_eef_relative_joint",
+  "seed": 7777,
+  "execution_horizon": 16,
+  "trajectories": {
+    "0": {
+      "mse": 0.037808844004120525,
+      "mae": 0.1285690092859182,
+      "steps": 167
+    },
+    "1": {
+      "mse": 0.005412985379212239,
+      "mae": 0.04644765555840636,
+      "steps": 200
+    },
+    "2": {
+      "mse": 0.0720959923186369,
+      "mae": 0.15489766366984173,
+      "steps": 200
+    }
+  },
+  "quantization_plan_counts": {
+    "fp8": 177,
+    "nvfp4": 247
+  },
+  "overall_mse": 0.03847596558775653,
+  "overall_mae": 0.10888904479082533
+}

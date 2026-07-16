@@ -101,6 +101,7 @@ class Gr00tPolicy(BasePolicy):
         device: int | str,
         strict: bool = True,
         prune_to_embodiment: bool = False,
+        quantization: str | None = None,
     ):
         """Initialize the Gr00t Policy.
 
@@ -117,6 +118,12 @@ class Gr00tPolicy(BasePolicy):
                 keeping only ~1/32 of them. Inference is bitwise identical for
                 this embodiment; requests for any other embodiment raise a
                 clear error. The pruned in-memory model must not be re-saved.
+            quantization: Opt-in low-precision inference for Blackwell-class
+                GPUs (default: None = BF16). "nvfp4" / "nvfp4-wo" / "fp8"
+                quantize the LLM and DiT Linear layers uniformly; a path to a
+                recipe JSON (see scripts/deployment/quantize_nvfp4.py) applies
+                a sensitivity-searched mixed-precision plan. Changes numerics;
+                validate task quality before deploying.
         """
         # Import this to register all models.
         import gr00t.model  # noqa: F401
@@ -199,6 +206,20 @@ class Gr00tPolicy(BasePolicy):
         # Optional in-memory pruning of embodiment-specific weights (see docstring).
         if prune_to_embodiment:
             self._prune_model_to_embodiment()
+
+        # Optional NVFP4/FP8 quantization (Blackwell only; see docstring).
+        self.quantization_plan: dict[str, str] | None = None
+        if quantization is not None:
+            from gr00t.quantization.nvfp4_inference import quantize_policy_model, summarize_plan
+
+            self.quantization_plan = quantize_policy_model(self.model, quantization)
+            import logging
+
+            logging.getLogger(__name__).info(
+                "Quantized policy model (%s): %s",
+                quantization,
+                summarize_plan(self.quantization_plan),
+            )
 
     def _prune_model_to_embodiment(self) -> None:
         """Prune the model's embodiment-specific weights to this policy's embodiment.
@@ -468,8 +489,15 @@ class Gr00tPolicy(BasePolicy):
             collated_inputs, device=self.model.device, dtype=torch.bfloat16
         )
 
-        # Step 4: Run model inference to predict actions
-        with torch.inference_mode():
+        # Step 4: Run model inference to predict actions.
+        # torchao's FP8 subclass kernels reject inference-mode tensors
+        # ("Cannot set version_counter for inference tensor"), so quantized
+        # policies with FP8 layers fall back to no_grad; numerics are the same.
+        if self.quantization_plan and "fp8" in self.quantization_plan.values():
+            inference_ctx = torch.no_grad()
+        else:
+            inference_ctx = torch.inference_mode()
+        with inference_ctx:
             model_pred = self.model.get_action(**collated_inputs)
         normalized_action = model_pred["action_pred"].float()
 

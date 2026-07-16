@@ -1,0 +1,30 @@
+{
+  "variant": "droid-nvfp4",
+  "quantize": "nvfp4",
+  "dataset": "demo_data/droid_sample",
+  "embodiment_tag": "oxe_droid_relative_eef_relative_joint",
+  "seed": 7777,
+  "execution_horizon": 16,
+  "trajectories": {
+    "0": {
+      "mse": 0.03726048418820566,
+      "mae": 0.12656337342395302,
+      "steps": 167
+    },
+    "1": {
+      "mse": 0.005084747947843273,
+      "mae": 0.045403710636515715,
+      "steps": 200
+    },
+    "2": {
+      "mse": 0.07580661897475996,
+      "mae": 0.16399657588067545,
+      "steps": 200
+    }
+  },
+  "quantization_plan_counts": {
+    "nvfp4": 360
+  },
+  "overall_mse": 0.039507538349119915,
+  "overall_mae": 0.11113957789283667
+}

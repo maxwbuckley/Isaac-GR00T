@@ -1,0 +1,6 @@
+== TRTQUALITY dit_bf16 ==
+INFO:root:  Average MSE across all trajs: 0.036221
+INFO:root:  Average MAE across all trajs: 0.105491
+== TRTQUALITY dit_nvfp4 ==
+INFO:root:  Average MSE across all trajs: 0.036705
+INFO:root:  Average MAE across all trajs: 0.105661

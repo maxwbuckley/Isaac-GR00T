@@ -79,6 +79,9 @@ def main():
     parser.add_argument("--denoising-steps", type=int, default=None)
     parser.add_argument("--disable-kv-cache", action="store_true")
     parser.add_argument("--compile", action="store_true")
+    parser.add_argument(
+        "--quantize", default=None, help="None|nvfp4|nvfp4-wo|fp8|recipe path (Blackwell only)"
+    )
     args = parser.parse_args()
 
     import os
@@ -97,7 +100,14 @@ def main():
         "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
         "config": {
             k: getattr(args, k)
-            for k in ("iters", "warmup", "batch_size", "denoising_steps", "disable_kv_cache")
+            for k in (
+                "iters",
+                "warmup",
+                "batch_size",
+                "denoising_steps",
+                "disable_kv_cache",
+                "quantize",
+            )
         },
         "compile": args.compile,
     }
@@ -107,6 +117,7 @@ def main():
         embodiment_tag=args.embodiment_tag,
         model_path=args.model_path,
         device="cuda:0" if torch.cuda.is_available() else "cpu",
+        quantization=args.quantize,
     )
     result["load_seconds"] = time.perf_counter() - t0
     result["peak_rss_after_load_mib"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024

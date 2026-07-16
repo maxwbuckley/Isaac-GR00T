@@ -1,0 +1,30 @@
+{
+  "variant": "droid-fp8",
+  "quantize": "fp8",
+  "dataset": "demo_data/droid_sample",
+  "embodiment_tag": "oxe_droid_relative_eef_relative_joint",
+  "seed": 7777,
+  "execution_horizon": 16,
+  "trajectories": {
+    "0": {
+      "mse": 0.03980378953204461,
+      "mae": 0.12946812188251966,
+      "steps": 167
+    },
+    "1": {
+      "mse": 0.00572781740860341,
+      "mae": 0.047575949982942,
+      "steps": 200
+    },
+    "2": {
+      "mse": 0.07269696539429088,
+      "mae": 0.15502173146156564,
+      "steps": 200
+    }
+  },
+  "quantization_plan_counts": {
+    "fp8": 360
+  },
+  "overall_mse": 0.03938657744696703,
+  "overall_mae": 0.10959561312748203
+}

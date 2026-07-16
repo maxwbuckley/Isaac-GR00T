@@ -418,6 +418,47 @@ For connecting to a real robot (e.g., DROID hardware), see [examples/DROID/READM
 
 See the complete [Policy API Guide](getting_started/policy.md) for documentation on observation/action formats, batched inference, and troubleshooting.
 
+### NVFP4 / FP8 Quantization (Blackwell GPUs)
+
+On Blackwell-class GPUs (RTX 50xx, Jetson Thor) the policy supports opt-in
+low-precision inference via [torchao](https://github.com/pytorch/ao) real
+NVFP4/FP8 kernels:
+
+```python
+from gr00t.policy.gr00t_policy import Gr00tPolicy
+
+policy = Gr00tPolicy(
+    embodiment_tag="OXE_DROID_RELATIVE_EEF_RELATIVE_JOINT",
+    model_path="nvidia/GR00T-N1.7-3B",
+    device="cuda:0",
+    quantization="nvfp4",          # or "fp8", or a recipe JSON path
+)
+```
+
+A sensitivity-aware mixed-precision recipe (NVFP4 for robust layers, FP8/BF16
+for sensitive ones) can be searched with TensorRT Model Optimizer's
+`auto_quantize` on your dataset:
+
+```bash
+uv run python scripts/deployment/quantize_nvfp4.py \
+    --model-path <ckpt> --dataset-path demo_data/libero_demo \
+    --embodiment-tag LIBERO_PANDA --mode auto --effective-bits 6.0 \
+    --output-recipe nvfp4_recipe.json
+```
+
+An NVFP4 TensorRT engine for the DiT action head (the NVFP4-robust component
+per sensitivity analysis) can be exported with
+`scripts/deployment/export_dit_nvfp4_onnx.py` and built with the standard
+`build_tensorrt_engine.py`.
+
+Measured on RTX 5090 (see `tools/perf/results/rtx5090-nvfp4-2026-07-17/`):
+the **searched mixed recipe shows no measurable open-loop quality loss**
+(uniform NVFP4 costs +30% action MSE on a finetuned checkpoint — use the
+recipe), weights VRAM −47%, TRT engine size −71% — but **slower at batch 1
+than BF16** in both PyTorch and TensorRT on that GPU (NVFP4's GEMM advantage
+needs larger batch dims). Use it for memory-constrained deployment, not
+desktop latency; validate task quality before deploying.
+
 ---
 
 ## Fine-tuning

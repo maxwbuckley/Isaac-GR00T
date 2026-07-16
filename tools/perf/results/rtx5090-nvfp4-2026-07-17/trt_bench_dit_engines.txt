@@ -1,0 +1,52 @@
+===== BENCH dit_bf16 =====
+
+====================================================================================================
+
+====================================================================================================
+DETAILED SUMMARY
+====================================================================================================
+
+Hardware: NVIDIA GeForce RTX 5090
+Model: /home/maxwb/.cache/huggingface/hub/models--nvidia--GR00T-N1.7-3B/snapshots/2fc962b973bccdd5d8ce4f67cc63b264d6886495
+Action Horizon: 40
+Denoising Steps: 4
+
+PyTorch Eager:
+  E2E:             median=169.4 ms, mean=162.8 ± 18.7 ms, min=111.7, max=184.4 (5.9 Hz)
+  Data Processing: 41.50 ms (median)
+  Backbone:        56.50 ms (median)
+  Action Head:     73.44 ms (median)
+
+TensorRT (dit_only):
+  E2E:             median=115.0 ms, mean=113.6 ± 13.7 ms, min=77.6, max=136.6 (8.7 Hz)
+  Data Processing: 41.50 ms (median)
+  Backbone:        52.01 ms (median)
+  Action Head:     21.54 ms (median)
+
+====================================================================================================
+===== BENCH dit_nvfp4 =====
+
+====================================================================================================
+
+====================================================================================================
+DETAILED SUMMARY
+====================================================================================================
+
+Hardware: NVIDIA GeForce RTX 5090
+Model: /home/maxwb/.cache/huggingface/hub/models--nvidia--GR00T-N1.7-3B/snapshots/2fc962b973bccdd5d8ce4f67cc63b264d6886495
+Action Horizon: 40
+Denoising Steps: 4
+
+PyTorch Eager:
+  E2E:             median=139.0 ms, mean=148.6 ± 24.3 ms, min=114.5, max=215.8 (7.2 Hz)
+  Data Processing: 38.48 ms (median)
+  Backbone:        50.52 ms (median)
+  Action Head:     48.79 ms (median)
+
+TensorRT (dit_only):
+  E2E:             median=126.3 ms, mean=125.6 ± 15.1 ms, min=88.3, max=160.5 (7.9 Hz)
+  Data Processing: 38.48 ms (median)
+  Backbone:        52.67 ms (median)
+  Action Head:     31.59 ms (median)
+
+====================================================================================================
