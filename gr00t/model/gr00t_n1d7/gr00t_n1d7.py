@@ -118,6 +118,32 @@ class Gr00tN1d7ActionHead(nn.Module):
             config.tune_projector, config.tune_diffusion_model, config.tune_vlln
         )
 
+    def prune_embodiments(self, keep: list[int]) -> None:
+        """Slice all embodiment-specific parameters down to the ``keep`` ids.
+
+        The state encoder, action encoder, and action decoder hold one weight
+        slice per embodiment ([max_num_embodiments, in, out] tensors, ~330M
+        parameters / ~650 MB in bf16 for the default 32-embodiment config), of
+        which a single-robot deployment uses only one. This method replaces
+        each of those tensors with a [len(keep), in, out] parameter holding the
+        same values and installs a remapping table so subsequent forwards may
+        keep passing the ORIGINAL embodiment ids. Forwards with an embodiment
+        id not in ``keep`` raise a clear ValueError.
+
+        This is an opt-in, deployment-time, in-memory optimization. A pruned
+        model is NOT intended to be saved with save_pretrained or re-loaded:
+        its parameter shapes no longer match the checkpoint config. Prune after
+        loading, never before saving. Training behavior and un-pruned models
+        are unaffected.
+
+        Args:
+            keep: Original embodiment ids to retain (non-empty, unique, each in
+                [0, max_num_embodiments)).
+        """
+        self.state_encoder.prune_categories(keep)
+        self.action_encoder.prune_categories(keep)
+        self.action_decoder.prune_categories(keep)
+
     def set_trainable_parameters(
         self, tune_projector: bool, tune_diffusion_model: bool, tune_vlln: bool
     ):
@@ -612,6 +638,16 @@ class Gr00tN1d7(PreTrainedModel):
         action_outputs = self.action_head.get_action(backbone_outputs, action_inputs, options)
 
         return action_outputs
+
+    def prune_embodiments(self, keep: list[int]) -> None:
+        """Slice embodiment-specific action-head parameters to the ``keep`` ids.
+
+        Opt-in, deployment-time, in-memory memory optimization. Subsequent
+        forwards keep using ORIGINAL embodiment ids; ids not in ``keep`` raise
+        a clear ValueError. A pruned model is NOT intended to be saved or
+        re-loaded. See Gr00tN1d7ActionHead.prune_embodiments for details.
+        """
+        self.action_head.prune_embodiments(keep)
 
     @property
     def device(self):
