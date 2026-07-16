@@ -41,12 +41,8 @@ def load_modality_config(modality_config_path: str):
         raise FileNotFoundError(f"Modality config path does not exist: {modality_config_path}")
 
 
-if __name__ == "__main__":
-    # Set LOGURU_LEVEL environment variable if not already set (default: INFO)
-    if "LOGURU_LEVEL" not in os.environ:
-        os.environ["LOGURU_LEVEL"] = "INFO"
-    # Use tyro for clean CLI
-    ft_config = tyro.cli(FinetuneConfig, description=__doc__)
+def build_experiment_config(ft_config: FinetuneConfig):
+    """Map the user-facing ``FinetuneConfig`` onto the full experiment config."""
     from gr00t.data.embodiment_tags import EmbodimentTag
 
     ft_config.embodiment_tag = EmbodimentTag.resolve(ft_config.embodiment_tag)
@@ -95,7 +91,7 @@ if __name__ == "__main__":
     else:
         config.model.extra_augmentation_config = None
 
-    config.model.load_bf16 = False
+    config.model.load_bf16 = ft_config.load_bf16
     config.model.reproject_vision = False
     config.model.model_name = "nvidia/Cosmos-Reason2-2B"
     config.model.backbone_trainable_params_fp32 = True
@@ -103,7 +99,7 @@ if __name__ == "__main__":
 
     config.training.experiment_name = ft_config.experiment_name
     config.training.start_from_checkpoint = ft_config.base_model_path
-    config.training.optim = "adamw_torch"
+    config.training.optim = ft_config.optim
     config.training.global_batch_size = ft_config.global_batch_size
     config.training.dataloader_num_workers = ft_config.dataloader_num_workers
     config.training.learning_rate = ft_config.learning_rate
@@ -127,4 +123,14 @@ if __name__ == "__main__":
     config.training.resume_from_checkpoint = ft_config.resume_from_checkpoint
     config.training.skip_weight_loading = ft_config.skip_weight_loading
 
+    return config
+
+
+if __name__ == "__main__":
+    # Set LOGURU_LEVEL environment variable if not already set (default: INFO)
+    if "LOGURU_LEVEL" not in os.environ:
+        os.environ["LOGURU_LEVEL"] = "INFO"
+    # Use tyro for clean CLI
+    ft_config = tyro.cli(FinetuneConfig, description=__doc__)
+    config = build_experiment_config(ft_config)
     run(config)

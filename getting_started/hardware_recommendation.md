@@ -56,6 +56,7 @@ The table below summarizes end-to-end inference frequency across tested platform
 - **Enabling `--tune-llm` or `--tune-visual`** significantly increases VRAM — 80 GB+ per GPU recommended.
 - **`--gradient-accumulation-steps`** can compensate for fewer GPUs. For example, 4 GPUs with 8 accumulation steps and per-GPU batch of 8 gives an effective global batch size of 256.
 - **Limited VRAM?** Trade micro-batch size for accumulation steps: activation memory scales with the per-GPU micro-batch (`GLOBAL_BATCH_SIZE / NUM_GPUS`), while the optimization itself depends only on the effective batch (`GLOBAL_BATCH_SIZE × GRADIENT_ACCUMULATION_STEPS`). For example, `GLOBAL_BATCH_SIZE=8 GRADIENT_ACCUMULATION_STEPS=4 bash examples/finetune.sh ...` optimizes with the same effective batch of 32 as the single-GPU default, at a fraction of the activation memory (at some throughput cost). Model weights, gradients, and optimizer state are unaffected by this trade.
+- **Low-VRAM flags:** `--load-bf16` stores the frozen backbone in bfloat16 instead of fp32 (weight memory ~12 GB → ~7.6 GB, accounting estimate; trainable parameters stay fp32), and `--optim paged_adamw_8bit` (requires `pip install bitsandbytes`) stores AdamW moments in 8 bits (optimizer state ~6.4 GB → ~1.6 GB, accounting estimate). Both default off; combine them with the batch trade above to bring the default fine-tune within reach of 24–32 GB GPUs.
 - **Reduce `--num-shards-per-epoch`** if host memory (not VRAM) is limited — this controls how much dataset is preloaded into RAM.
 
 ---

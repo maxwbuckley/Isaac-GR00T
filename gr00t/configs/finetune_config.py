@@ -18,6 +18,25 @@ from dataclasses import dataclass
 import warnings
 
 
+ALLOWED_OPTIMS = ("adamw_torch", "adamw_torch_fused", "paged_adamw_8bit", "adamw_8bit")
+"""Optimizers accepted by ``FinetuneConfig.optim`` (HuggingFace ``TrainingArguments.optim`` names)."""
+
+BITSANDBYTES_OPTIMS = ("paged_adamw_8bit", "adamw_8bit")
+"""Subset of ``ALLOWED_OPTIMS`` that require the ``bitsandbytes`` package."""
+
+
+def _require_bitsandbytes(optim: str) -> None:
+    """Fail fast (at CLI parse time, before any dataset/model loading) if an
+    8-bit optimizer was requested but bitsandbytes is not installed."""
+    try:
+        import bitsandbytes  # noqa: F401
+    except ImportError as exc:
+        raise ValueError(
+            f"optim={optim!r} requires the bitsandbytes package, which is not installed. "
+            "Install it with: pip install bitsandbytes"
+        ) from exc
+
+
 @dataclass
 class FinetuneConfig:
     """
@@ -57,6 +76,16 @@ class FinetuneConfig:
 
     tune_diffusion_model: bool = True
     """If True, fine-tune the diffusion-based action decoder (if present in the model)."""
+
+    load_bf16: bool = False
+    """
+    If True, store the frozen backbone weights in bfloat16 instead of upcasting the
+    bf16 checkpoint to fp32, saving ~4-5 GB of GPU memory. Trainable parameters
+    (the action head, plus any backbone parameters unfrozen via the tune_* flags)
+    remain fp32, so optimizer updates keep fp32 master weights either way. Training
+    numerics of the frozen forward pass shift at bf16-rounding level relative to the
+    fp32 default (matching inference numerics, which run fully in bf16).
+    """
 
     state_dropout_prob: float = 0.2
     """
@@ -131,6 +160,14 @@ class FinetuneConfig:
     learning_rate: float = 1e-4
     """Initial learning rate for optimizer."""
 
+    optim: str = "adamw_torch"
+    """
+    Optimizer passed to HuggingFace ``TrainingArguments.optim``. One of
+    "adamw_torch" (default), "adamw_torch_fused", "paged_adamw_8bit", or "adamw_8bit".
+    The 8-bit variants require the bitsandbytes package (pip install bitsandbytes)
+    and cut optimizer-state memory ~4x by storing AdamW moments in 8 bits.
+    """
+
     gradient_accumulation_steps: int = 1
     """Forward passes per optimizer step. Multiplies ``global_batch_size`` to
     produce the post-accumulation per-optimizer-step batch."""
@@ -197,6 +234,10 @@ class FinetuneConfig:
     Useful for CI/testing to skip the slow checkpoint shard loading."""
 
     def __post_init__(self) -> None:
+        if self.optim not in ALLOWED_OPTIMS:
+            raise ValueError(f"optim must be one of {ALLOWED_OPTIMS}, got {self.optim!r}")
+        if self.optim in BITSANDBYTES_OPTIMS:
+            _require_bitsandbytes(self.optim)
         if self.gradient_accumulation_steps < 1:
             raise ValueError(
                 f"gradient_accumulation_steps must be >= 1, got {self.gradient_accumulation_steps}"
