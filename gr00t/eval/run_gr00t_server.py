@@ -94,7 +94,11 @@ class ServerConfig:
     # Latency / model-serving configs (Gr00tPolicy only; ignored for ReplayPolicy)
     denoising_steps: int | None = None
     """Number of flow-matching denoising steps for the action head (must be >= 1).
-    None keeps the checkpoint default (4). Fewer steps trade accuracy for latency."""
+    None keeps the checkpoint default (4). WARNING: fewer steps directly increase
+    flow-matching integration error and can significantly degrade task success,
+    not just add noise — validate closed-loop success rate at the reduced step
+    count before deploying (measured on RTX 5090: 4 -> 2 steps saves ~12% E2E
+    latency; the quality cost has NOT been characterized)."""
 
     warmup: bool = True
     """Run one dummy inference through the policy before serving so the first real
