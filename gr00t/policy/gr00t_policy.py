@@ -34,26 +34,39 @@ from gr00t.data.types import MessageType, ModalityConfig, VLAStepData
 from .policy import BasePolicy, PolicyWrapper
 
 
-def _rec_to_dtype(x: Any, dtype: torch.dtype) -> Any:
-    """Recursively convert all floating point tensors in a nested structure to the given dtype.
+def _rec_to_device_dtype(x: Any, device: torch.device | str, dtype: torch.dtype) -> Any:
+    """Recursively move tensors to ``device``, casting floating-point tensors to ``dtype``.
+
+    This fuses the previous two-pass flow — a CPU-side ``.to(dtype)`` cast over
+    the whole tree followed by a second full traversal inside the model's
+    ``prepare_input`` (``.to(self.device, dtype=self.dtype)``) — into a single
+    traversal with one ``.to`` per tensor. The semantics mirror
+    ``Gr00tN1d7.prepare_input``'s ``to_device_with_dtype`` exactly: only
+    tensors for which ``torch.is_floating_point`` is true are cast to
+    ``dtype``; all other tensors change device only. fp32→bf16 conversion is
+    round-to-nearest-even on both CPU and GPU, so the fused transfer is
+    bitwise identical to the old CPU pre-cast. ``prepare_input`` still runs
+    afterwards, but tensors already on the target device/dtype pass through
+    its ``.to`` calls as no-ops.
 
     Args:
         x: Input data structure (tensor, dict, list, or other)
+        device: Target device for all tensors
         dtype: Target torch dtype for floating point tensors
 
     Returns:
-        Data structure with floating point tensors converted to target dtype
-
-    Warning:
-        Non-floating point tensors will be left as is.
+        Data structure with tensors moved (floats also cast); non-tensor
+        leaves are returned unchanged.
     """
-    if isinstance(x, torch.Tensor) and torch.is_floating_point(x):
-        return x.to(dtype=dtype)
-    # Handle dict-like objects (tianshou.BatchFeature is not dict but has items() method)
+    if isinstance(x, torch.Tensor):
+        if torch.is_floating_point(x):
+            return x.to(device, dtype=dtype, non_blocking=True)
+        return x.to(device, non_blocking=True)
+    # Handle dict-like objects (transformers BatchFeature is not dict but has items() method)
     elif isinstance(x, dict) or hasattr(x, "items"):
-        return {k: _rec_to_dtype(v, dtype) for k, v in x.items()}  # type: ignore
+        return {k: _rec_to_device_dtype(v, device, dtype) for k, v in x.items()}  # type: ignore
     elif isinstance(x, list):
-        return [_rec_to_dtype(v, dtype) for v in x]
+        return [_rec_to_device_dtype(v, device, dtype) for v in x]
     else:
         return x
 
@@ -408,9 +421,15 @@ class Gr00tPolicy(BasePolicy):
             messages = [{"type": MessageType.EPISODE_STEP.value, "content": vla_step_data}]
             processed_inputs.append(self.processor(messages))
 
-        # Step 3: Collate processed inputs into a single batch for model
+        # Step 3: Collate processed inputs into a single batch for model.
+        # Fused host-to-device transfer: each tensor is moved to the model
+        # device once, with float tensors cast to bf16 in the same .to call,
+        # instead of a CPU-side cast pass plus a second full traversal in
+        # prepare_input (which now passes the tensors through unchanged).
         collated_inputs = self.collate_fn(processed_inputs)
-        collated_inputs = _rec_to_dtype(collated_inputs, dtype=torch.bfloat16)
+        collated_inputs = _rec_to_device_dtype(
+            collated_inputs, device=self.model.device, dtype=torch.bfloat16
+        )
 
         # Step 4: Run model inference to predict actions
         with torch.inference_mode():

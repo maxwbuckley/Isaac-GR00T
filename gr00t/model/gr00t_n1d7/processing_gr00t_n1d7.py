@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections import OrderedDict
 from copy import deepcopy
 import json
 import logging
@@ -156,6 +157,100 @@ def validate_action_horizons(modality_configs, max_action_horizon: int) -> None:
         )
 
 
+#: Bound on the inference-time text memoization caches. A robot episode uses a
+#: single constant instruction, so a handful of entries covers multi-task
+#: rollouts while keeping worst-case memory negligible.
+_TEXT_CACHE_MAXSIZE = 32
+
+
+class _LRUCache:
+    """Tiny bounded LRU cache for memoizing constant per-episode text artifacts.
+
+    Tracks ``hits``/``misses`` so tests can assert whether the cache was
+    consulted (e.g. that training-mode code paths never touch it).
+    """
+
+    def __init__(self, maxsize: int = _TEXT_CACHE_MAXSIZE):
+        self.maxsize = maxsize
+        self.hits = 0
+        self.misses = 0
+        self._data: OrderedDict[Any, Any] = OrderedDict()
+
+    def get(self, key: Any) -> Any | None:
+        try:
+            value = self._data[key]
+        except KeyError:
+            self.misses += 1
+            return None
+        self._data.move_to_end(key)
+        self.hits += 1
+        return value
+
+    def put(self, key: Any, value: Any) -> None:
+        self._data[key] = value
+        self._data.move_to_end(key)
+        while len(self._data) > self.maxsize:
+            self._data.popitem(last=False)
+
+    def clear(self) -> None:
+        self._data.clear()
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+
+def _tokenize_vlm_inputs(
+    vlm_processor,
+    texts: list[str],
+    images: list,
+    cache: _LRUCache | None,
+) -> BatchFeature:
+    """Tokenize chat-template texts and images, memoizing the text-side tensors.
+
+    ``Qwen3VLProcessor.__call__`` fuses three steps: (1) image feature
+    extraction (``pixel_values`` / ``image_grid_thw``), (2) expansion of each
+    ``<|image_pad|>`` placeholder to ``prod(grid_thw) // merge_size**2``
+    copies, and (3) tokenization of the expanded texts. Step (1) depends on
+    pixel content and must run every control step, but steps (2)-(3) depend
+    only on the texts and the image grids — both constant across a robot
+    episode with a fixed instruction and fixed camera geometry.
+
+    With ``cache=None`` (training, or cache disabled) this is exactly the
+    original single processor call. With a cache, a miss also delegates to the
+    unmodified full processor call (so miss outputs are bitwise identical to
+    the uncached behavior) and stores clones of the text-side tensors keyed on
+    ``(texts, image_grid_thw, padding_side)``; a hit reuses those tensors
+    (cloned again, so callers may mutate results freely) and only recomputes
+    the image features.
+    """
+    if cache is None or not images:
+        return vlm_processor(text=texts, images=images, return_tensors="pt", padding=True)
+
+    # Image features must be recomputed every call (content changes), and the
+    # resulting grid is part of the cache key because the number of expanded
+    # image-pad tokens — and therefore ``input_ids`` — depends on it. This is
+    # the same ``image_processor`` invocation (same kwargs) that
+    # ``Qwen3VLProcessor.__call__`` performs internally.
+    image_inputs = vlm_processor.image_processor(images=images, return_tensors="pt")
+    key = (
+        tuple(texts),
+        tuple(tuple(int(v) for v in row) for row in image_inputs["image_grid_thw"]),
+        vlm_processor.tokenizer.padding_side,
+    )
+    cached_text_inputs = cache.get(key)
+    if cached_text_inputs is None:
+        tokenized = vlm_processor(text=texts, images=images, return_tensors="pt", padding=True)
+        image_keys = set(image_inputs.keys())
+        # Store clones so later in-place mutation of the returned batch cannot
+        # corrupt the cache.
+        cache.put(key, {k: v.clone() for k, v in tokenized.items() if k not in image_keys})
+        return tokenized
+    data = dict(image_inputs)
+    # Clone cached tensors so one control step cannot corrupt the next.
+    data.update({k: v.clone() for k, v in cached_text_inputs.items()})
+    return BatchFeature(data=data)
+
+
 class Gr00tN1d7DataCollator:
     def __init__(
         self,
@@ -169,6 +264,12 @@ class Gr00tN1d7DataCollator:
         self.processor.tokenizer.padding_side = "left"
         self.model_type = model_type
         self.model_name = model_name
+        # Optional memoization of the text-side tokenization (input_ids /
+        # attention_mask). Disabled (None) by default so training dataloaders
+        # keep the exact original code path; ``Gr00tN1d7Processor.eval()``
+        # points this at the processor's inference cache and ``train()``
+        # resets it to None.
+        self.vlm_tokenize_cache: _LRUCache | None = None
 
     def __call__(self, features: list[Dict[str, Any]]) -> BatchFeature:
         batch = {}
@@ -187,11 +288,11 @@ class Gr00tN1d7DataCollator:
                     curr_image_inputs = v["images"]
                     image_inputs += curr_image_inputs
 
-                vlm_inputs = self.processor(
-                    text=text_list,
-                    images=image_inputs,
-                    return_tensors="pt",
-                    padding=True,
+                vlm_inputs = _tokenize_vlm_inputs(
+                    self.processor,
+                    text_list,
+                    image_inputs,
+                    self.vlm_tokenize_cache,
                 )
                 for k, v in vlm_inputs.items():
                     batch[k] = v
@@ -323,6 +424,13 @@ class Gr00tN1d7Processor(BaseProcessor):
                 color_jitter_params,
                 letter_box_transform=self.letter_box_transform,
             )
+        # Inference-only memoization of constant per-episode text artifacts
+        # (normalized instruction, rendered chat template, text-side
+        # tokenization). ``train()`` clears and disables them; the training
+        # code paths never consult them.
+        self._language_cache = _LRUCache(_TEXT_CACHE_MAXSIZE)
+        self._chat_template_cache = _LRUCache(_TEXT_CACHE_MAXSIZE)
+        self._vlm_tokenize_cache = _LRUCache(_TEXT_CACHE_MAXSIZE)
         self._collator = self.data_collator_class(
             model_name=model_name,
             model_type=model_type,
@@ -337,10 +445,68 @@ class Gr00tN1d7Processor(BaseProcessor):
     def train(self):
         super().train()
         self.state_action_processor.train()
+        # Text-processing caches are inference-only: training applies
+        # augmentation and must keep the exact original (uncached) code paths.
+        for cache in self._text_caches():
+            cache.clear()
+        collator = getattr(self, "_collator", None)
+        if collator is not None:
+            collator.vlm_tokenize_cache = None
 
     def eval(self):
         super().eval()
         self.state_action_processor.eval()
+        collator = getattr(self, "_collator", None)
+        if collator is not None:
+            collator.vlm_tokenize_cache = self._vlm_tokenize_cache
+
+    def _text_caches(self) -> tuple[_LRUCache, ...]:
+        return (self._language_cache, self._chat_template_cache, self._vlm_tokenize_cache)
+
+    def _formalize_language(self, language: str) -> str:
+        """Lowercase and strip punctuation when ``formalize_language`` is set.
+
+        At inference the instruction is constant across an episode's control
+        steps, so the normalized string is memoized (keyed on the raw string);
+        training keeps the uncached path.
+        """
+        if not self.formalize_language:
+            return language
+        use_cache = not self.training
+        if use_cache:
+            cached = self._language_cache.get(language)
+            if cached is not None:
+                return cached
+        normalized = re.sub(r"[^\w\s]", "", language.lower())
+        if use_cache:
+            self._language_cache.put(language, normalized)
+        return normalized
+
+    def _apply_chat_template(
+        self, conversation: list[dict[str, Any]], language: str, pil_images: list[Image.Image]
+    ) -> str:
+        """Render the chat template, memoizing the result at inference.
+
+        The rendered text depends only on the conversation structure — the
+        instruction string and one placeholder per image — never on pixel
+        content, so it is constant across an episode's control steps. The
+        cache key nevertheless includes every per-image attribute a template
+        could realistically inspect (count via tuple length, size, mode) in
+        addition to the instruction, so the memoized text is exact.
+        """
+        if self.training:
+            return self.processor.apply_chat_template(
+                conversation, tokenize=False, add_generation_prompt=False
+            )
+        key = (language, tuple((img.size, img.mode) for img in pil_images))
+        cached = self._chat_template_cache.get(key)
+        if cached is not None:
+            return cached
+        text = self.processor.apply_chat_template(
+            conversation, tokenize=False, add_generation_prompt=False
+        )
+        self._chat_template_cache.put(key, text)
+        return text
 
     def set_statistics(
         self,
@@ -508,10 +674,7 @@ class Gr00tN1d7Processor(BaseProcessor):
             transformed_images = self.eval_image_transform(images_perm).numpy()
 
         language_key = modality_config["language"].modality_keys[0]
-        language = [
-            re.sub(r"[^\w\s]", "", lang.lower()) if self.formalize_language else lang
-            for lang in observation[language_key]
-        ]
+        language = [self._formalize_language(lang) for lang in observation[language_key]]
 
         texts, all_images = [], []
         for i in range(B):
@@ -519,7 +682,12 @@ class Gr00tN1d7Processor(BaseProcessor):
             vc = vlm_inputs["vlm_content"]
             texts.append(vc["text"])
             all_images.extend(vc["images"])
-        tokenized = self.processor(text=texts, images=all_images, return_tensors="pt", padding=True)
+        tokenized = _tokenize_vlm_inputs(
+            self.processor,
+            texts,
+            all_images,
+            None if self.training else self._vlm_tokenize_cache,
+        )
         for k, v in tokenized.items():
             transformed_observation[k] = v
 
@@ -565,9 +733,8 @@ class Gr00tN1d7Processor(BaseProcessor):
         ]
 
         # Apply chat template but don't process yet - let collator handle it
-        text = self.processor.apply_chat_template(
-            conversation, tokenize=False, add_generation_prompt=False
-        )
+        # (memoized at inference; see _apply_chat_template)
+        text = self._apply_chat_template(conversation, language, pil_images)
 
         # Return vlm_content format for collation
         return {
@@ -675,11 +842,7 @@ class Gr00tN1d7Processor(BaseProcessor):
             image_transform = self.eval_image_transform
         image_keys = self.modality_configs[embodiment_tag.value]["video"].modality_keys
 
-        if self.formalize_language:
-            language = content.text.lower()
-            language = re.sub(r"[^\w\s]", "", language)
-        else:
-            language = content.text
+        language = self._formalize_language(content.text)
 
         vlm_inputs = self._get_vlm_inputs(
             image_keys=image_keys,
