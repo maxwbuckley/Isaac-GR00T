@@ -104,6 +104,10 @@ class Gr00tN1d7Config(PretrainedConfig):
 
     # Flow matching parameters
     num_inference_timesteps: int = 4
+    # Cache DiT cross-attention K/V projections of the (static) VL features
+    # across denoise steps during sampling. Bitwise no-op on outputs; can also
+    # be disabled at runtime with GR00T_DISABLE_DIT_KV_CACHE=1.
+    use_dit_kv_cache: bool = True
     noise_beta_alpha: float = 1.5
     noise_beta_beta: float = 1.0
     noise_s: float = 0.999
