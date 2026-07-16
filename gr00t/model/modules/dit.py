@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import os
 from typing import Optional
 
@@ -56,6 +56,140 @@ def _sdpa_context():
         enable_mem_efficient=False,
         enable_cudnn=False,
     )
+
+
+class CachedCrossAttnProcessor2_0:
+    """Scoped drop-in for diffusers ``AttnProcessor2_0`` that caches cross-attention K/V.
+
+    During flow-matching sampling the DiT runs once per denoise step, but the
+    ``encoder_hidden_states`` (VL features) are static across those steps: the
+    same input tensor, the same ``to_k``/``to_v`` weights, and the same kernels
+    produce bitwise-identical projections on every step. This processor
+    computes the K/V projections on the first step and reuses them on
+    subsequent steps. Self-attention calls (``encoder_hidden_states is None``)
+    are never cached and follow the stock code path.
+
+    Cache validity is tied to the *identity* of the incoming
+    ``encoder_hidden_states`` tensor: any other tensor object triggers a fresh
+    projection. Instances are installed only for the duration of a
+    ``DiT.cache_cross_attention_kv`` scope and discarded afterwards, so cached
+    activations cannot leak across sampling calls, observations, or batch
+    shapes. Caching is skipped entirely while autograd is recording, so
+    gradient-tracking forwards (training) are never affected.
+    """
+
+    def __init__(self):
+        if not hasattr(F, "scaled_dot_product_attention"):
+            raise ImportError("CachedCrossAttnProcessor2_0 requires PyTorch 2.0.")
+        self._cached_source: Optional[torch.Tensor] = None
+        self._cached_key: Optional[torch.Tensor] = None
+        self._cached_value: Optional[torch.Tensor] = None
+        # Instrumentation (used by tests to prove the cache is active).
+        self.cache_hits = 0
+        self.cache_misses = 0
+
+    def __call__(
+        self,
+        attn: Attention,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        temb: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        # Mirrors diffusers.models.attention_processor.AttnProcessor2_0.__call__,
+        # with the K/V projection factored out behind the cache.
+        residual = hidden_states
+        if attn.spatial_norm is not None:
+            hidden_states = attn.spatial_norm(hidden_states, temb)
+
+        input_ndim = hidden_states.ndim
+        if input_ndim == 4:
+            batch_size, channel, height, width = hidden_states.shape
+            hidden_states = hidden_states.view(batch_size, channel, height * width).transpose(1, 2)
+
+        batch_size, sequence_length, _ = (
+            hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
+        )
+
+        if attention_mask is not None:
+            attention_mask = attn.prepare_attention_mask(
+                attention_mask, sequence_length, batch_size
+            )
+            # scaled_dot_product_attention expects attention_mask shape to be
+            # (batch, heads, source_length, target_length)
+            attention_mask = attention_mask.view(
+                batch_size, attn.heads, -1, attention_mask.shape[-1]
+            )
+
+        if attn.group_norm is not None:
+            hidden_states = attn.group_norm(hidden_states.transpose(1, 2)).transpose(1, 2)
+
+        # K/V come from `encoder_hidden_states` for cross-attention; those are
+        # static across denoise steps, so reuse the cached projections when the
+        # exact same tensor object is passed again. Never cache while autograd
+        # is recording (training must keep its graph) and never cache
+        # self-attention (its K/V depend on the per-step hidden states).
+        kv_source = encoder_hidden_states
+        may_cache = kv_source is not None and not torch.is_grad_enabled()
+        if may_cache and self._cached_source is kv_source:
+            key = self._cached_key
+            value = self._cached_value
+            self.cache_hits += 1
+        else:
+            if encoder_hidden_states is None:
+                encoder_hidden_states = hidden_states
+            elif attn.norm_cross:
+                encoder_hidden_states = attn.norm_encoder_hidden_states(encoder_hidden_states)
+
+            key = attn.to_k(encoder_hidden_states)
+            value = attn.to_v(encoder_hidden_states)
+
+            inner_dim = key.shape[-1]
+            head_dim = inner_dim // attn.heads
+            key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+            value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+            if attn.norm_k is not None:
+                key = attn.norm_k(key)
+
+            if may_cache:
+                assert not key.requires_grad and not value.requires_grad, (
+                    "cross-attention K/V cache must not retain autograd graphs"
+                )
+                self._cached_source = kv_source
+                self._cached_key = key
+                self._cached_value = value
+                self.cache_misses += 1
+
+        head_dim = key.shape[-1]
+        query = attn.to_q(hidden_states)
+        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        if attn.norm_q is not None:
+            query = attn.norm_q(query)
+
+        # the output of sdp = (batch, num_heads, seq_len, head_dim)
+        hidden_states = F.scaled_dot_product_attention(
+            query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+        )
+
+        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
+        hidden_states = hidden_states.to(query.dtype)
+
+        # linear proj
+        hidden_states = attn.to_out[0](hidden_states)
+        # dropout
+        hidden_states = attn.to_out[1](hidden_states)
+
+        if input_ndim == 4:
+            hidden_states = hidden_states.transpose(-1, -2).reshape(
+                batch_size, channel, height, width
+            )
+
+        if attn.residual_connection:
+            hidden_states = hidden_states + residual
+
+        hidden_states = hidden_states / attn.rescale_output_factor
+
+        return hidden_states
 
 
 class TimestepEncoder(nn.Module):
@@ -288,6 +422,38 @@ class DiT(ModelMixin, ConfigMixin):
             "Total number of DiT parameters: ",
             sum(p.numel() for p in self.parameters() if p.requires_grad),
         )
+
+    @contextmanager
+    def cache_cross_attention_kv(self, enabled: bool = True):
+        """Scope under which cross-attention K/V projections are cached.
+
+        Use around a denoising loop where ``encoder_hidden_states`` stays
+        static across forward calls (one action chunk = one observation = one
+        set of VL features). On entry every transformer block's attention
+        processor is swapped for a :class:`CachedCrossAttnProcessor2_0`; on
+        exit (including on error) the original processors are restored and the
+        scoped processors — and with them all cached K/V tensors — are
+        dropped. That makes invalidation structural: a new sampling call opens
+        a new scope with empty caches, so stale VL features can never be
+        reused across observations.
+
+        Yields the list of installed caching processors (for introspection in
+        tests); yields an empty list when ``enabled`` is False.
+        """
+        if not enabled:
+            yield []
+            return
+
+        attn_modules = [block.attn1 for block in self.transformer_blocks]
+        original_processors = [attn.processor for attn in attn_modules]
+        cached_processors = [CachedCrossAttnProcessor2_0() for _ in attn_modules]
+        for attn, processor in zip(attn_modules, cached_processors):
+            attn.set_processor(processor)
+        try:
+            yield cached_processors
+        finally:
+            for attn, processor in zip(attn_modules, original_processors):
+                attn.set_processor(processor)
 
     def forward(
         self,

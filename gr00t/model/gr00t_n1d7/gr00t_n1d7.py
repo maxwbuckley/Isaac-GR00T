@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import logging
+import os
 from typing import Any, Tuple
 
 import torch
@@ -166,6 +167,17 @@ class Gr00tN1d7ActionHead(nn.Module):
             if not self.tune_vlln:
                 self.vlln.eval()
                 self.vl_self_attention.eval()
+
+    def _dit_kv_cache_enabled(self) -> bool:
+        """Whether DiT cross-attention K/V is cached across denoise steps.
+
+        Enabled by default for sampling; it never applies to the training
+        forward (which runs the DiT once and needs gradients). Disable via the
+        ``use_dit_kv_cache`` config field or ``GR00T_DISABLE_DIT_KV_CACHE=1``.
+        """
+        if os.environ.get("GR00T_DISABLE_DIT_KV_CACHE", "").strip() == "1":
+            return False
+        return bool(getattr(self.config, "use_dit_kv_cache", True))
 
     def sample_time(self, batch_size, device, dtype):
         sample = self.beta_dist.sample([batch_size]).to(device, dtype=dtype)
@@ -393,46 +405,52 @@ class Gr00tN1d7ActionHead(nn.Module):
                 :,
             ] = ramp[None, :, None].to(device)
 
-        # Run denoising steps.
-        for t in range(self.num_inference_timesteps):
-            t_cont = t / float(self.num_inference_timesteps)  # e.g. goes 0, 1/N, 2/N, ...
-            t_discretized = int(t_cont * self.num_timestep_buckets)
+        # Run denoising steps. `vl_embeds` is static across the loop, so the
+        # DiT cross-attention K/V projections of it are bitwise-identical on
+        # every step; cache them for the duration of this sampling call only
+        # (the scope ends — and the cache is dropped — before returning).
+        with self.model.cache_cross_attention_kv(enabled=self._dit_kv_cache_enabled()):
+            for t in range(self.num_inference_timesteps):
+                t_cont = t / float(self.num_inference_timesteps)  # e.g. goes 0, 1/N, 2/N, ...
+                t_discretized = int(t_cont * self.num_timestep_buckets)
 
-            # Embed noised action trajectory.
-            timesteps_tensor = torch.full(
-                size=(batch_size,), fill_value=t_discretized, device=device
-            )
-            action_features = self.action_encoder(actions, timesteps_tensor, embodiment_id)
-            # Add position embedding.
-            if self.config.add_pos_embed:
-                pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
-                pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
-                action_features = action_features + pos_embs
-
-            # Join vision, language, state and action embedding along sequence dimension.
-            sa_embs = torch.cat((state_features, action_features), dim=1)
-
-            # Run model forward.
-            if self.config.use_alternate_vl_dit:
-                model_output = self.model(
-                    hidden_states=sa_embs,
-                    encoder_hidden_states=vl_embeds,
-                    timestep=timesteps_tensor,
-                    image_mask=backbone_output.image_mask,
-                    backbone_attention_mask=backbone_output.backbone_attention_mask,
+                # Embed noised action trajectory.
+                timesteps_tensor = torch.full(
+                    size=(batch_size,), fill_value=t_discretized, device=device
                 )
-            else:
-                model_output = self.model(
-                    hidden_states=sa_embs,
-                    encoder_hidden_states=vl_embeds,
-                    timestep=timesteps_tensor,
-                )
-            pred = self.action_decoder(model_output, embodiment_id)
+                action_features = self.action_encoder(actions, timesteps_tensor, embodiment_id)
+                # Add position embedding.
+                if self.config.add_pos_embed:
+                    pos_ids = torch.arange(
+                        action_features.shape[1], dtype=torch.long, device=device
+                    )
+                    pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
+                    action_features = action_features + pos_embs
 
-            pred_velocity = pred[:, -self.action_horizon :]
+                # Join vision, language, state and action embedding along sequence dimension.
+                sa_embs = torch.cat((state_features, action_features), dim=1)
 
-            # Update actions using euler integration.
-            actions = actions + dt * pred_velocity * vel_strength
+                # Run model forward.
+                if self.config.use_alternate_vl_dit:
+                    model_output = self.model(
+                        hidden_states=sa_embs,
+                        encoder_hidden_states=vl_embeds,
+                        timestep=timesteps_tensor,
+                        image_mask=backbone_output.image_mask,
+                        backbone_attention_mask=backbone_output.backbone_attention_mask,
+                    )
+                else:
+                    model_output = self.model(
+                        hidden_states=sa_embs,
+                        encoder_hidden_states=vl_embeds,
+                        timestep=timesteps_tensor,
+                    )
+                pred = self.action_decoder(model_output, embodiment_id)
+
+                pred_velocity = pred[:, -self.action_horizon :]
+
+                # Update actions using euler integration.
+                actions = actions + dt * pred_velocity * vel_strength
 
         return BatchFeature(
             data={
