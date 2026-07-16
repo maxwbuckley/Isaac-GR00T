@@ -314,8 +314,9 @@ def main(args: ArgsConfig):
         if args.denoising_steps != ArgsConfig.denoising_steps:
             logging.warning(
                 "--denoising-steps=%d is ignored when running against a remote "
-                "policy server; set the denoising steps on the server "
+                "policy server; pass --denoising-steps %d to the server "
                 "(run_gr00t_server.py) instead.",
+                args.denoising_steps,
                 args.denoising_steps,
             )
 

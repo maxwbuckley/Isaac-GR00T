@@ -16,15 +16,19 @@
 from dataclasses import dataclass
 import importlib
 import json
+import logging
 import os
 from pathlib import Path
 import sys
+import time
+from typing import Any
 
 from gr00t.data.embodiment_tags import EmbodimentTag
 from gr00t.data.types import ModalityConfig
 from gr00t.policy.gr00t_policy import Gr00tPolicy
 from gr00t.policy.replay_policy import ReplayPolicy
 from gr00t.policy.server_client import PolicyServer
+import numpy as np
 import tyro
 
 
@@ -87,6 +91,129 @@ class ServerConfig:
     use_sim_policy_wrapper: bool = False
     """Whether to use the sim policy wrapper"""
 
+    # Latency / model-serving configs (Gr00tPolicy only; ignored for ReplayPolicy)
+    denoising_steps: int | None = None
+    """Number of flow-matching denoising steps for the action head (must be >= 1).
+    None keeps the checkpoint default (4). Fewer steps trade accuracy for latency."""
+
+    warmup: bool = True
+    """Run one dummy inference through the policy before serving so the first real
+    request doesn't pay CUDA context init / cuDNN autotune / lazy processor init.
+    Disable with --no-warmup."""
+
+    compile: bool = False
+    """torch.compile the DiT forward (mode='max-autotune') and enable cuDNN autotune,
+    mirroring scripts/deployment/benchmark_inference.py. Compilation happens before
+    warmup so warmup absorbs the JIT latency. Enable with --compile."""
+
+
+def _warmup_state_dims(policy: Gr00tPolicy) -> dict[str, int]:
+    """Best-effort per-key state dims for a warmup observation.
+
+    The modality config lists state keys but not their dimensions, so read them
+    from the processor's state/action normalization metadata
+    (``state_action_processor.norm_params[<tag>]["state"][<key>]["dim"]``), which
+    is derived from the checkpoint's dataset statistics. Fall back to 1 for any
+    key whose metadata is missing — warmup is best-effort by design.
+    """
+    state_keys = policy.get_modality_config()["state"].modality_keys
+    try:
+        norm_params = policy.processor.state_action_processor.norm_params[
+            policy.embodiment_tag.value
+        ]["state"]
+    except (AttributeError, KeyError, TypeError):
+        norm_params = {}
+
+    dims = {}
+    for key in state_keys:
+        try:
+            dims[key] = int(norm_params[key]["dim"])
+        except (KeyError, TypeError, ValueError):
+            dims[key] = 1
+    return dims
+
+
+def build_warmup_observation(policy: Gr00tPolicy) -> dict[str, Any]:
+    """Build a dummy observation matching the policy's modality config.
+
+    Shapes follow ``Gr00tPolicy.check_observation``: video values are uint8
+    (B, T, H, W, 3) arrays, state values are float32 (B, T, D) arrays, and
+    language values are (B, T) nested lists of strings, with T taken from each
+    modality's delta_indices and B=1.
+    """
+    modality_configs = policy.get_modality_config()
+    video_horizon = len(modality_configs["video"].delta_indices)
+    state_horizon = len(modality_configs["state"].delta_indices)
+    language_horizon = len(modality_configs["language"].delta_indices)
+    state_dims = _warmup_state_dims(policy)
+
+    return {
+        "video": {
+            key: np.zeros((1, video_horizon, 256, 256, 3), dtype=np.uint8)
+            for key in modality_configs["video"].modality_keys
+        },
+        "state": {
+            key: np.zeros((1, state_horizon, state_dims[key]), dtype=np.float32)
+            for key in modality_configs["state"].modality_keys
+        },
+        "language": {
+            key: [["warmup"] * language_horizon]
+            for key in modality_configs["language"].modality_keys
+        },
+    }
+
+
+def warmup_policy(policy: Gr00tPolicy) -> None:
+    """Run one dummy inference so the first real request doesn't pay init costs.
+
+    A warmup failure must never prevent serving: any exception is logged loudly
+    and swallowed.
+    """
+    start = time.perf_counter()
+    try:
+        observation = build_warmup_observation(policy)
+        policy.get_action(observation)
+    except Exception:
+        logging.warning(
+            "Warmup inference failed after %.2fs; the server will still start, but the "
+            "first real request will pay one-time initialization costs.",
+            time.perf_counter() - start,
+            exc_info=True,
+        )
+        return
+    print(f"  Warmup inference completed in {time.perf_counter() - start:.2f}s")
+
+
+def apply_server_optimizations(config: ServerConfig, policy: Gr00tPolicy) -> None:
+    """Apply --denoising-steps / --compile / --warmup to a freshly built Gr00tPolicy.
+
+    Order matters: denoising steps and compilation are applied first so the
+    warmup inference runs the final configuration (and absorbs torch.compile's
+    JIT latency).
+    """
+    import torch
+
+    if config.denoising_steps is not None:
+        if config.denoising_steps < 1:
+            raise ValueError(f"--denoising-steps must be >= 1; got {config.denoising_steps}.")
+        policy.model.action_head.num_inference_timesteps = config.denoising_steps
+    effective_steps = getattr(policy.model.action_head, "num_inference_timesteps", None)
+    source = "checkpoint default" if config.denoising_steps is None else "--denoising-steps"
+    print(f"  Denoising steps: {effective_steps} ({source})")
+
+    if config.compile:
+        # Mirror scripts/deployment/benchmark_inference.py: compile the DiT
+        # forward and enable cuDNN autotune.
+        policy.model.action_head.model.forward = torch.compile(
+            policy.model.action_head.model.forward, mode="max-autotune"
+        )
+        if torch.cuda.is_available():
+            torch.backends.cudnn.benchmark = True
+        print("  torch.compile: enabled (mode='max-autotune', cuDNN benchmark on)")
+
+    if config.warmup:
+        warmup_policy(policy)
+
 
 def main(config: ServerConfig):
     config.embodiment_tag = EmbodimentTag.resolve(config.embodiment_tag)
@@ -108,7 +235,13 @@ def main(config: ServerConfig):
             device=config.device,
             strict=config.strict,
         )
+        apply_server_optimizations(config, policy)
     elif config.dataset_path is not None:
+        if config.denoising_steps is not None or config.compile:
+            raise ValueError(
+                "--denoising-steps and --compile only apply to model serving "
+                "(--model-path); they have no effect on a ReplayPolicy (--dataset-path)."
+            )
         if config.execution_horizon is None:
             raise ValueError(
                 "--execution-horizon is required when --dataset-path is set "
