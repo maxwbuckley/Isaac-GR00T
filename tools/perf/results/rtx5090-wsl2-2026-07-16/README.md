@@ -45,3 +45,19 @@ weights; the shipped checkpoint's trainable set is ~1.6B params):
   has NOT been re-verified; the RSS reduction is unambiguous.
 - Quality (loss curves / closed-loop success) was NOT validated for
   `--load-bf16` / 8-bit AdamW / 2-step denoising in these runs.
+
+## Addendum: B6 image-pipeline rework (same day, post-merge)
+
+Bitwise-safe preprocessing restructuring (PIL round-trip removal — the
+checkpoint already ships the fast torchvision image processor, so PIL
+conversion was pure overhead — plus numpy/torch round-trip elimination):
+
+| Measurement | Before B6 | After B6 |
+|---|---|---|
+| process_cpu stage (median) | 35.6 ms | **5.3 ms** (below NVIDIA's 6.2 ms H100 figure) |
+| E2E eager (single 30-iter run) | 138.1 ms | 129.6 ms |
+| E2E + `--compile` (n=30) | 90.7 ms | **82.7 ms (12.1 Hz)** — x1.75 vs main's 145.0 ms |
+| Seeded action parity vs main | — | still **bitwise identical** |
+
+Caveat: post-B6 E2E numbers are single 30-iter runs, not pooled ABBA;
+the process_cpu stage improvement (-85%) is the robust claim.
