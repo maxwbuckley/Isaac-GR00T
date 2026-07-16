@@ -13,6 +13,8 @@ SHARD_SIZE="${SHARD_SIZE:-1024}"
 NUM_SHARDS_PER_EPOCH="${NUM_SHARDS_PER_EPOCH:-100000}"
 EPISODE_SAMPLING_RATE="${EPISODE_SAMPLING_RATE:-0.1}"
 DS_WEIGHTS_ALPHA="${DS_WEIGHTS_ALPHA:-}"
+LOAD_BF16="${LOAD_BF16:-}"
+OPTIM="${OPTIM:-}"
 
 BASE_MODEL_PATH=""
 DATASET_PATH=""
@@ -201,6 +203,24 @@ if [ -n "$CROP_FRACTION" ]; then
 fi
 if [ -n "$DS_WEIGHTS_ALPHA" ]; then
     LAUNCH_CMD+=(--ds_weights_alpha "$DS_WEIGHTS_ALPHA")
+fi
+if [ -n "$LOAD_BF16" ]; then
+    LOAD_BF16_NORMALIZED="$(printf '%s' "$LOAD_BF16" | tr '[:upper:]' '[:lower:]')"
+    case "$LOAD_BF16_NORMALIZED" in
+        1|true|yes|on)
+            LAUNCH_CMD+=(--load-bf16)
+            ;;
+        0|false|no|off)
+            LAUNCH_CMD+=(--no-load-bf16)
+            ;;
+        *)
+            echo "Invalid LOAD_BF16 value: $LOAD_BF16" >&2
+            exit 1
+            ;;
+    esac
+fi
+if [ -n "$OPTIM" ]; then
+    LAUNCH_CMD+=(--optim "$OPTIM")
 fi
 if [ -n "${SAVE_ONLY_MODEL:-}" ]; then
     LAUNCH_CMD+=(--save_only_model)

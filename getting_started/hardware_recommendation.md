@@ -55,6 +55,7 @@ The table below summarizes end-to-end inference frequency across tested platform
 - **Default fine-tuning** tunes the projector + diffusion action head (not the full LLM backbone), keeping peak VRAM under ~35 GB per GPU.
 - **Enabling `--tune-llm` or `--tune-visual`** significantly increases VRAM — 80 GB+ per GPU recommended.
 - **`--gradient-accumulation-steps`** can compensate for fewer GPUs. For example, 4 GPUs with 8 accumulation steps and per-GPU batch of 8 gives an effective global batch size of 256.
+- **Low-VRAM flags:** `--load-bf16` stores the frozen backbone in bfloat16 instead of fp32 (weight memory ~12 GB → ~7.6 GB, accounting estimate; trainable parameters stay fp32), and `--optim paged_adamw_8bit` (requires `pip install bitsandbytes`) stores AdamW moments in 8 bits (optimizer state ~6.4 GB → ~1.6 GB, accounting estimate). Both default off; combine them to cut roughly 9 GB of peak VRAM.
 - **Reduce `--num-shards-per-epoch`** if host memory (not VRAM) is limited — this controls how much dataset is preloaded into RAM.
 
 ---
