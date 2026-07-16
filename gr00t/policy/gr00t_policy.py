@@ -87,6 +87,7 @@ class Gr00tPolicy(BasePolicy):
         *,
         device: int | str,
         strict: bool = True,
+        prune_to_embodiment: bool = False,
     ):
         """Initialize the Gr00t Policy.
 
@@ -96,6 +97,13 @@ class Gr00tPolicy(BasePolicy):
             model_path: Path to the pretrained model checkpoint directory
             device: Device to run the model on (e.g., 'cuda:0', 0, 'cpu')
             strict: Whether to enforce strict input validation (default: True)
+            prune_to_embodiment: Opt-in memory optimization (default: False).
+                When True, the embodiment-specific action-head parameters
+                (~650 MB in bf16 for the default 32-embodiment config) are
+                sliced in-memory down to this policy's single embodiment,
+                keeping only ~1/32 of them. Inference is bitwise identical for
+                this embodiment; requests for any other embodiment raise a
+                clear error. The pruned in-memory model must not be re-saved.
         """
         # Import this to register all models.
         import gr00t.model  # noqa: F401
@@ -173,6 +181,34 @@ class Gr00tPolicy(BasePolicy):
         assert len(language_keys) >= 1, "At least one language key is required"
         assert len(language_delta_indices) == 1, "Only one language delta index is supported"
         self.language_key = language_keys[0]
+
+        # Optional in-memory pruning of embodiment-specific weights (see docstring).
+        if prune_to_embodiment:
+            self._prune_model_to_embodiment()
+
+    def _prune_model_to_embodiment(self) -> None:
+        """Prune the model's embodiment-specific weights to this policy's embodiment.
+
+        The integer embodiment id used by the model is defined by the
+        processor's ``embodiment_id_mapping`` (tag value -> projector index),
+        the same mapping the processor uses to stamp ``embodiment_id`` into
+        model inputs. Delegates to ``model.prune_embodiments``.
+        """
+        embodiment_id_mapping = getattr(self.processor, "embodiment_id_mapping", None)
+        if not isinstance(embodiment_id_mapping, dict):
+            raise ValueError(
+                "prune_to_embodiment=True requires a processor exposing an "
+                f"'embodiment_id_mapping' dict; got {type(embodiment_id_mapping).__name__} "
+                f"from {type(self.processor).__name__}."
+            )
+        if self.embodiment_tag.value not in embodiment_id_mapping:
+            raise ValueError(
+                f"Embodiment tag '{self.embodiment_tag.value}' is missing from the "
+                "processor's embodiment_id_mapping; cannot determine the embodiment id "
+                "to prune to."
+            )
+        embodiment_id = int(embodiment_id_mapping[self.embodiment_tag.value])
+        self.model.prune_embodiments([embodiment_id])
 
     def _unbatch_observation(self, value: dict[str, Any]) -> list[dict[str, Any]]:
         """Unbatch a batched observation into a list of single observations.

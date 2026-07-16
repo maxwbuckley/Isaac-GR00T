@@ -65,6 +65,28 @@ class CategorySpecificLinear(nn.Module):
         # For each category, we have separate weights and biases.
         self.W = nn.Parameter(0.02 * torch.randn(num_categories, input_dim, hidden_dim))
         self.b = nn.Parameter(torch.zeros(num_categories, hidden_dim))
+        # Lookup table mapping ORIGINAL category ids to rows of the (pruned)
+        # weight tensors. None by default, which keeps the un-pruned fast path
+        # zero-overhead (a single `is None` branch in forward). Set by
+        # prune_categories(); entries of -1 mark ids that were pruned away.
+        # Non-persistent: it never appears in state_dict, so un-pruned
+        # checkpoints are byte-identical to before this feature existed.
+        self.register_buffer("category_remap", None, persistent=False)
+
+    def _resolve_cat_ids(self, cat_ids):
+        """Map original category ids to pruned rows; raise on un-kept ids."""
+        if self.category_remap is None:
+            return cat_ids
+        remapped = self.category_remap[cat_ids]
+        if (remapped < 0).any():
+            invalid = torch.unique(cat_ids[remapped < 0]).tolist()
+            kept = torch.nonzero(self.category_remap >= 0).flatten().tolist()
+            raise ValueError(
+                f"This module was pruned to embodiment ids {kept} but received "
+                f"un-kept embodiment ids {invalid}. Reload the model without "
+                f"pruning (or prune with these ids included) to serve them."
+            )
+        return remapped
 
     def forward(self, x, cat_ids):
         """
@@ -74,9 +96,49 @@ class CategorySpecificLinear(nn.Module):
         Returns:
             [B, T, hidden_dim] output tensor
         """
+        cat_ids = self._resolve_cat_ids(cat_ids)
         selected_W = self.W[cat_ids]
         selected_b = self.b[cat_ids]
         return torch.bmm(x, selected_W) + selected_b.unsqueeze(1)
+
+    def prune_categories(self, keep: list[int]) -> None:
+        """Slice the per-category weights down to the ``keep`` ids, in place.
+
+        This is a deployment-time, in-memory optimization: the [num_categories,
+        in, out] weight/bias tensors are replaced with [len(keep), in, out]
+        parameters holding the same values, and a remapping table is installed
+        so subsequent forwards may keep using the ORIGINAL category ids.
+        Forwards with an id not in ``keep`` raise a clear ValueError.
+
+        A pruned module is NOT intended to be saved and re-loaded: its
+        parameter shapes no longer match the checkpoint config. Prune after
+        loading, never before saving.
+
+        Args:
+            keep: Original category ids to retain (non-empty, unique, each in
+                [0, num_categories)).
+        """
+        if self.category_remap is not None:
+            raise RuntimeError(
+                "CategorySpecificLinear has already been pruned; pruning twice is not supported."
+            )
+        keep = [int(k) for k in keep]
+        if not keep:
+            raise ValueError("`keep` must contain at least one category id.")
+        if len(set(keep)) != len(keep):
+            raise ValueError(f"`keep` must not contain duplicate ids, got {keep}.")
+        out_of_range = [k for k in keep if not 0 <= k < self.num_categories]
+        if out_of_range:
+            raise ValueError(
+                f"Category ids {out_of_range} are out of range [0, {self.num_categories})."
+            )
+        device = self.W.device
+        keep_index = torch.tensor(keep, dtype=torch.long, device=device)
+        self.W = nn.Parameter(self.W.data[keep_index].clone(), requires_grad=self.W.requires_grad)
+        self.b = nn.Parameter(self.b.data[keep_index].clone(), requires_grad=self.b.requires_grad)
+        remap = torch.full((self.num_categories,), -1, dtype=torch.long, device=device)
+        remap[keep_index] = torch.arange(len(keep), dtype=torch.long, device=device)
+        self.category_remap = remap
 
     def expand_action_dimension(
         self, old_action_dim, new_action_dim, expand_input=False, expand_output=False
@@ -160,6 +222,15 @@ class CategorySpecificMLP(nn.Module):
         hidden = F.relu(self.layer1(x, cat_ids))
         return self.layer2(hidden, cat_ids)
 
+    def prune_categories(self, keep: list[int]) -> None:
+        """Prune both layers to the ``keep`` category ids.
+
+        Deployment-time, in-memory optimization; a pruned module is NOT
+        intended to be saved/re-loaded. See CategorySpecificLinear.prune_categories.
+        """
+        self.layer1.prune_categories(keep)
+        self.layer2.prune_categories(keep)
+
     def expand_action_dimension(self, old_action_dim, new_action_dim):
         """
         Expand action dimension by copying weights from existing dimensions.
@@ -223,6 +294,16 @@ class MultiEmbodimentActionEncoder(nn.Module):
         # 5) Finally W3 => (B, T, w)
         x = self.W3(x, cat_ids)
         return x
+
+    def prune_categories(self, keep: list[int]) -> None:
+        """Prune W1/W2/W3 to the ``keep`` embodiment ids.
+
+        Deployment-time, in-memory optimization; a pruned module is NOT
+        intended to be saved/re-loaded. See CategorySpecificLinear.prune_categories.
+        """
+        self.W1.prune_categories(keep)
+        self.W2.prune_categories(keep)
+        self.W3.prune_categories(keep)
 
     def expand_action_dimension(self, old_action_dim, new_action_dim):
         """
