@@ -107,7 +107,14 @@ class Gr00tN1d7Config(PretrainedConfig):
     # Cache DiT cross-attention K/V projections of the (static) VL features
     # across denoise steps during sampling. Bitwise no-op on outputs; can also
     # be disabled at runtime with GR00T_DISABLE_DIT_KV_CACHE=1.
-    use_dit_kv_cache: bool = True
+    # Default OFF for two measured reasons: (1) on RTX 5090 (eager, 4 denoise
+    # steps, n=60/60, Welch t=2.37) the per-call processor swap costs ~4%
+    # median E2E — more than the saved projections at this VL sequence length;
+    # (2) reusing cached K/V across steps breaks torch.compile(mode=
+    # "max-autotune") CUDA graphs ("tensor output of CUDAGraphs ... overwritten
+    # by a subsequent run"). Enable only after measuring a win on your
+    # hardware, and never together with a compiled DiT.
+    use_dit_kv_cache: bool = False
     noise_beta_alpha: float = 1.5
     noise_beta_beta: float = 1.0
     noise_s: float = 0.999

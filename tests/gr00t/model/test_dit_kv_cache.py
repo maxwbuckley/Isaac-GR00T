@@ -289,6 +289,7 @@ def test_env_var_disables_cache(monkeypatch):
     """GR00T_DISABLE_DIT_KV_CACHE=1 must bypass the cache entirely."""
     torch.manual_seed(7)
     config = _make_small_config(num_inference_timesteps=4)
+    config.use_dit_kv_cache = True  # opt in; the env var must still win
     model = _build_model(config)
     inputs = _make_inputs(config, batch_size=1)
     assert config.use_dit_kv_cache is True
