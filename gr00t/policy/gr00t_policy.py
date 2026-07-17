@@ -137,7 +137,17 @@ class Gr00tPolicy(BasePolicy):
         # torch_dtype avoids materializing the bf16 checkpoint in fp32 first.
         model = AutoModel.from_pretrained(model_dir, torch_dtype=torch.bfloat16)
         model.eval()  # Set model to evaluation mode
-        model.to(device=device, dtype=torch.bfloat16)
+        # When quantizing, keep the freshly loaded model on the host and defer
+        # the device move to the quantization step: quantize_policy_model streams
+        # each module to ``device`` as it packs it, so the full bf16 model is
+        # never resident in VRAM at once and peak load memory tracks the
+        # (smaller) quantized footprint instead of the bf16 one.
+        if quantization is None:
+            model.to(device=device, dtype=torch.bfloat16)
+        else:
+            # Normalize dtype on the host (free — host RAM, not VRAM); the
+            # device move is deferred to the streaming quantization step below.
+            model.to(dtype=torch.bfloat16)
         self.model = model
 
         # Load the processor for input/output transformation.
@@ -212,7 +222,11 @@ class Gr00tPolicy(BasePolicy):
         if quantization is not None:
             from gr00t.quantization.nvfp4_inference import quantize_policy_model, summarize_plan
 
-            self.quantization_plan = quantize_policy_model(self.model, quantization)
+            self.quantization_plan = quantize_policy_model(self.model, quantization, device=device)
+            # Land any residual host-side (non-quantized) submodules/buffers on
+            # the device; already-quantized tensors are a no-op, so this adds no
+            # bf16 transient.
+            self.model.to(device=device)
             import logging
 
             logging.getLogger(__name__).info(

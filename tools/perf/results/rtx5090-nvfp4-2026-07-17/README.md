@@ -117,8 +117,28 @@ extensions on torch 2.9 ("requires torch ≥ 2.11"), and the FP8-per-row path is
 pathologically slow without them (which also poisons the mixed recipe's
 latency — 180 of its layers are FP8).
 
-Weights VRAM after load (bs=1): BF16 6015 MiB → **NVFP4 3181 MiB (−47%)**,
-recipe 3226 MiB, FP8 4037 MiB.
+Weights VRAM resident after load (bs=1): BF16 6015 MiB → **NVFP4 3181 MiB
+(−47%)**, recipe 3226 MiB, FP8 4037 MiB.
+
+**Streaming quantized load** (`Gr00tPolicy(quantization=...)` keeps the model
+on the host and passes `device=` to torchao `quantize_`, which moves each
+module onto the GPU as it packs it): peak load VRAM now tracks the quantized
+footprint instead of a full-BF16 transient. The streamed and in-place orders
+produce the same packed weights — verified **bitwise-identical** action output
+on NVFP4 (max |Δ| = 0.0); FP8 and the recipe go through the same
+`quantize_(..., device=)` mechanism.
+
+| Peak `cuda_max_allocated` (bs=1) | old (load→quantize) | new (streaming) |
+|---|---|---|
+| NVFP4 | 6486 MiB | **3832 MiB (−41%)** |
+| FP8 | 6183 MiB | 4275 MiB (−31%) |
+| mixed recipe | 6075 MiB | 5671 MiB (−7%) |
+
+The recipe gains least because it runs two `quantize_` passes (the second
+format's layers sit in BF16 on the GPU between passes); a single per-FQN-config
+pass would close that gap. Net effect: a uniform-NVFP4 policy now needs ~4 GB
+of VRAM to *load*, not ~6.5 GB — the memory saving finally shows up at load
+time, which is what matters for small/edge Blackwell parts.
 
 ### TensorRT 10.15 (DiT engine, `--inference-mode tensorrt`)
 

@@ -112,15 +112,23 @@ def quantize_policy_model(
     spec: str,
     *,
     scopes: tuple[str, ...] = DEFAULT_SCOPES,
+    device: torch.device | str | int | None = None,
 ) -> dict[str, str]:
     """Apply real quantization to a loaded ``Gr00tN1d7`` in place.
 
     Args:
-        model: The policy model, already on its CUDA device in bf16.
+        model: The policy model, in bf16. May be on the host (CPU): pass
+            ``device`` to stream it onto the accelerator during quantization.
         spec: "nvfp4" | "nvfp4-wo" | "fp8" (uniform over default scopes), or a
             path to a recipe JSON for per-layer mixed precision.
         scopes: Which module scopes to consider (uniform specs only; recipes
             carry their own layer lists).
+        device: If given, torchao moves each module onto this device as it is
+            quantized (``quantize_(..., device=...)``), so the full bf16 model
+            is never resident on the device at once — peak memory tracks the
+            quantized footprint. If None, quantize in place on the model's
+            current device. Quantization requires a Blackwell-class device; the
+            check runs against the current CUDA device regardless.
 
     Returns:
         Mapping of layer FQN -> applied format (excluding untouched bf16 layers).
@@ -154,7 +162,12 @@ def quantize_policy_model(
 
     for fmt, names in by_fmt.items():
         cfg = _torchao_config(fmt)
-        quantize_(model, cfg, filter_fn=lambda module, fqn, names=names: fqn in names)
+        quantize_(
+            model,
+            cfg,
+            filter_fn=lambda module, fqn, names=names: fqn in names,
+            device=device,
+        )
         logger.info("Applied %s to %d layers", fmt, len(names))
 
     return plan
