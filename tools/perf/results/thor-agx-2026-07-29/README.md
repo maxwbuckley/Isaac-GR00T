@@ -257,6 +257,57 @@ Processing". Either WSL2's memory path punishes strided gathers severely, or
 the two numbers measure different things. Re-running the microbenchmark above on
 the 5090 box would settle it.
 
+## B4 (inference-time text cache) isolated on Thor
+
+`fix/b4-processing-cache` is a single commit on current `main`, so it was
+measured directly against it. Two levels, because they disagree.
+
+**Function level** (`tools/perf/bench_b4_insitu.py`): hook
+`_tokenize_vlm_inputs` during a real processor+collator call to capture the exact
+arguments, then time that function with `cache=None` vs `cache=_LRUCache()`.
+500 iterations after 50 warmup:
+
+| Path | median | p10 | p90 | min |
+|---|---|---|---|---|
+| `cache=None` | 4.614 ms | 1.210 | 6.887 | 1.030 |
+| `cache=LRU` (all hits) | **0.512 ms** | 0.453 | 4.985 | 0.447 |
+
+-4.10 ms median (-88.9%), 550 hits / 1 miss, outputs **bitwise identical** via
+`torch.equal` across `input_ids`, `attention_mask`, `pixel_values`,
+`image_grid_thw`. This independently confirms B4's no-diff claim.
+
+**Pipeline level**: interleaved ABBA, 50 iterations after 10 warmup, 10 rounds
+per side on an idle machine:
+
+| Stage | B4 | main | delta |
+|---|---|---|---|
+| Data processing | 7.72 +/- 0.25 ms | 8.66 +/- 0.33 ms | **-0.93 ms (-10.8%)** |
+| E2E | 141.50 ms | 143.54 ms | -2.04 ms (-1.4%) |
+
+Data stage faster in **10/10 rounds**, paired t = 6.28 (df=9), p < 0.001.
+Variance halves, which matters more than the mean for a control loop. E2E is
+**not** significant (t = 1.75): a ~1 ms stage delta is unresolvable through E2E
+spread (sd 2.4-3.5 ms).
+
+**UNEXPLAINED:** the function-level saving is 4.10 ms but only 0.93 ms reaches
+the stage. The stage timer does cover the collator (`prepare_model_inputs` calls
+both `processor(messages)` and `collate_fn`), so scope is not the answer.
+Untested candidates: the tight loop keeping tokenizer state in L1/L2 that real
+pipeline work evicts, or HF fast-tokenizer per-call overhead amplified under
+repetition. The defensible number is -10.8%, not -88.9%.
+
+B4's own tests pass on Thor: 15 passed, 1 deselected (gpu).
+
+### Methodology note: watch for self-matching process watchers
+
+Rounds 1-6 of this A/B showed sign-flipping deltas (+3.84, -0.44, +0.93, +1.67,
++0.11, +3.19) and sd 0.92 on the base arm. Cause was ten leftover
+`until ! pgrep -f benchmark_inference` watcher shells from earlier background
+waits: each matched its own pattern, so it never self-terminated, and they
+polled every 10-30 s throughout. After killing them (load 1.5 -> 1.14), rounds
+7-16 gave sd 0.33 and 10/10 consistency. **Check for stray load before trusting
+a noisy A/B on this box.**
+
 ## perf-integration on Thor
 
 Single run per side (not pooled ABBA), same benchmark script (byte-identical
