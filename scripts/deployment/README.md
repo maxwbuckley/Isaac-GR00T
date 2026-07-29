@@ -150,6 +150,23 @@ Each step can be run individually via `--steps <step>`. Verbose logs are written
 
 GR00T N1.7 Inference Timing (4 denoising steps, 1 camera):
 
+> **Camera count matters when comparing against these numbers.** Every row below
+> is a **1-camera** run. Multi-camera embodiments feed more vision tokens through
+> the ViT and lengthen the VL sequence — `libero_sim`, for example, defines two
+> views (`image`, `wrist_image`), giving 512 patches and a 156-token VL sequence
+> against a 1-camera run's 256 patches / ~92 tokens.
+>
+> `benchmark_inference.py` prints the active camera count on every run, and
+> `--num-cameras N` restricts inference to the first N views for an
+> apples-to-apples comparison against this table.
+>
+> Measured effect on Jetson AGX Thor (eager, `libero_10`): dropping from 2
+> cameras to 1 moved the backbone 56.14 -> 51.73 ms (-7.9%) and E2E 135.6 ->
+> 133.9 ms (-1.3%). The backbone is dominated by reading ~3.2 GB of ViT+LLM
+> weights once per forward rather than by token count, so the effect is far
+> smaller than the 2x token ratio suggests — but it is not zero, and it is
+> larger on the data-processing stage (-12%).
+
 | Device | Mode | Data Processing | Backbone | Action Head | E2E | Frequency | E2E Speedup |
 |--------|------|-----------------|----------|-------------|-----|-----------|-------------|
 | **dGPU** | | | | | | | |

@@ -73,6 +73,30 @@ if _DEPLOY_DIR not in sys.path:
 from _trt_contract import resolve_batch_size  # noqa: E402
 
 
+def _limit_cameras(policy, modality_config, num_cameras: int) -> None:
+    """Restrict inference to the first N camera views, in place.
+
+    The processor keeps its own copy of the modality configs (it looks up
+    image_keys from self.modality_configs[tag]), so truncating only the
+    policy-level config would leave the processor still expecting every view.
+    Both are updated here.
+    """
+    all_keys = modality_config["video"].modality_keys
+    if not 1 <= num_cameras <= len(all_keys):
+        raise ValueError(
+            f"--num-cameras must be in [1, {len(all_keys)}] for this embodiment "
+            f"(views: {all_keys}); got {num_cameras}"
+        )
+    kept = list(all_keys[:num_cameras])
+    modality_config["video"].modality_keys = kept
+
+    tag = policy.embodiment_tag.value
+    processor_configs = policy.processor.get_modality_configs()
+    if tag in processor_configs and "video" in processor_configs[tag]:
+        processor_configs[tag]["video"].modality_keys = kept
+    print(f"Limiting to {num_cameras} camera view(s): dropped {all_keys[num_cameras:]}")
+
+
 def set_seed(seed: int = 42):
     """Set random seed for reproducibility."""
     import random
@@ -370,6 +394,11 @@ class BenchmarkConfig:
     batch_size: int = 1
     """Batch size for TRT inference. Must match the batch size used during ONNX export."""
 
+    num_cameras: int | None = None
+    """Limit inference to the first N camera views. Default: all views the
+    embodiment defines. NVIDIA's published tables are 1-camera runs, so set
+    this to 1 for an apples-to-apples comparison against them."""
+
     use_trajectory: bool = False
     """Benchmark on full trajectory instead of single data point. This cycles through all steps in an episode for more realistic benchmarking."""
 
@@ -421,6 +450,15 @@ def main(args: BenchmarkConfig | None = None):
         resolve_batch_size(args.trt_engine_path, args.batch_size, source="benchmark_inference")
 
     modality_config = policy.get_modality_config()
+
+    # Camera count drives ViT patch count and VL sequence length, so it must be
+    # reported alongside any timing: a 2-camera run does roughly twice the
+    # vision work of a 1-camera one. NVIDIA's published tables are 1-camera.
+    if args.num_cameras is not None:
+        _limit_cameras(policy, modality_config, args.num_cameras)
+    camera_keys = modality_config["video"].modality_keys
+    print(f"Cameras: {len(camera_keys)} ({', '.join(camera_keys)})")
+
     dataset = LeRobotEpisodeLoader(
         dataset_path=args.dataset_path,
         modality_configs=modality_config,
@@ -542,6 +580,11 @@ def main(args: BenchmarkConfig | None = None):
             device=device,
             strict=True,
         )
+        # Each mode builds its own policy, so the camera limit has to be
+        # re-applied per instance -- the observation was already built for the
+        # limited view set and the processor would otherwise demand every view.
+        if args.num_cameras is not None:
+            _limit_cameras(policy_compiled, policy_compiled.get_modality_config(), args.num_cameras)
         policy_compiled.model.action_head.model.forward = torch.compile(
             policy_compiled.model.action_head.model.forward, mode="max-autotune"
         )
@@ -600,6 +643,8 @@ def main(args: BenchmarkConfig | None = None):
             device=device,
             strict=True,
         )
+        if args.num_cameras is not None:
+            _limit_cameras(policy_trt, policy_trt.get_modality_config(), args.num_cameras)
 
         if args.trt_mode in ("n17_full_pipeline", "vit_llm_only"):
             from trt_model_forward import setup_tensorrt_engines

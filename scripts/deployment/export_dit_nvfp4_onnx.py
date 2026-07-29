@@ -56,6 +56,9 @@ class Args:
     calib_batches: int = 32
     """Calibration batches (batch size 1, real dataset steps)."""
 
+    recipe: str | None = None
+    """Path to a sensitivity-searched QuantRecipe JSON. Default: uniform NVFP4."""
+
     batch_size: int = 1
     """Batch dimension baked into the exported graph."""
 
@@ -92,8 +95,14 @@ def main(args: Args) -> None:
     hook.remove()
     assert dit_capture.captured, "failed to capture DiT inputs"
 
-    # NVFP4 PTQ over the full policy model (recipe scope); only the DiT is exported.
-    model = ptq(policy.model, calib, fmt="nvfp4")
+    # PTQ over the full policy model (recipe scope); only the DiT is exported.
+    if args.recipe:
+        from gr00t.quantization.modelopt_ptq import ptq_with_recipe
+        from gr00t.quantization.recipe import load_recipe
+
+        model = ptq_with_recipe(policy.model, calib, load_recipe(args.recipe))
+    else:
+        model = ptq(policy.model, calib, fmt="nvfp4")
     print(summarize_quantization(model))
 
     dit = model.action_head.model

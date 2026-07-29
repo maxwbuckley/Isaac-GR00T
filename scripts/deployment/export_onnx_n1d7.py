@@ -1308,11 +1308,28 @@ def main(args):
     )
     logger.info("  Policy loaded")
 
+    modality_configs = policy.get_modality_config()
+    if args.num_cameras is not None:
+        all_views = modality_configs["video"].modality_keys
+        if not 1 <= args.num_cameras <= len(all_views):
+            raise ValueError(
+                f"--num-cameras must be in [1, {len(all_views)}] for this embodiment "
+                f"(views: {all_views}); got {args.num_cameras}"
+            )
+        kept = list(all_views[: args.num_cameras])
+        modality_configs["video"].modality_keys = kept
+        processor_configs = policy.processor.get_modality_configs()
+        tag = policy.embodiment_tag.value
+        if tag in processor_configs and "video" in processor_configs[tag]:
+            processor_configs[tag]["video"].modality_keys = kept
+        logger.info(f"  Limiting export to {args.num_cameras} camera view(s): {kept}")
+    logger.info(f"  Cameras: {len(modality_configs['video'].modality_keys)}")
+
     # Step 2: Load dataset
     logger.info("\n[Step 2] Loading dataset...")
     dataset = LeRobotEpisodeLoader(
         dataset_path=args.dataset_path,
-        modality_configs=policy.get_modality_config(),
+        modality_configs=modality_configs,
     )
     logger.info(f"  Dataset loaded ({len(dataset)} trajectories)")
 
@@ -1532,6 +1549,16 @@ class ExportConfig:
 
     export_mode: ExportMode = ExportMode.dit_only
     """Export mode: 'dit_only', 'action_head' (4 components), or 'full_pipeline' (ViT + action head)."""
+
+    num_cameras: Optional[int] = None
+    """Limit the export to the first N camera views. Default: all views the
+    embodiment defines.
+
+    The ViT input is a STATIC [num_patches, dim] dimension in the exported graph,
+    so camera count is baked into the engine: a 2-camera engine (512 patches)
+    cannot run a 1-camera observation (256 patches). Export with the same
+    --num-cameras you intend to benchmark, and match NVIDIA's published tables
+    (1 camera) with --num-cameras 1."""
 
     precision: Literal["bf16"] = "bf16"
     """Export precision for the generated ONNX graph.

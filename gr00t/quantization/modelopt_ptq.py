@@ -127,6 +127,77 @@ def _disable_non_linear_quantizers(model) -> int:
     return disabled
 
 
+def _quantizer_cfgs(fmt: str) -> dict:
+    """Extract the {weight,input}_quantizer cfg bodies from a format's default config."""
+    cfg = _get_format_cfg(fmt)
+    out = {}
+    for rule in cfg["quant_cfg"]:
+        name = rule.get("quantizer_name")
+        if name in ("*weight_quantizer", "*input_quantizer") and "cfg" in rule:
+            out[name.lstrip("*")] = rule["cfg"]
+    missing = {"weight_quantizer", "input_quantizer"} - out.keys()
+    if missing:
+        raise ValueError(f"format '{fmt}' has no default rule for {sorted(missing)}")
+    return out
+
+
+def _recipe_rules(recipe: QuantRecipe, model) -> list[dict]:
+    """Translate a per-layer recipe into modelopt list-style quant_cfg rules.
+
+    Starts from everything disabled, then enables each Linear at the format the
+    recipe assigns it (bf16 layers are simply left disabled). Emitting one rule
+    per (layer, quantizer) keeps the mapping explicit rather than relying on
+    glob precedence between overlapping patterns.
+    """
+    bodies = {f: _quantizer_cfgs(f) for f in ("nvfp4", "fp8")}
+    rules: list[dict] = [{"quantizer_name": "*", "enable": False}]
+    counts: dict[str, int] = {}
+    for name, module in model.named_modules():
+        if not isinstance(module, torch.nn.Linear):
+            continue
+        fmt = recipe.format_for(name)
+        counts[fmt] = counts.get(fmt, 0) + 1
+        if fmt == "bf16":
+            continue
+        for quantizer in ("weight_quantizer", "input_quantizer"):
+            rules.append(
+                {
+                    "quantizer_name": f"*{name}.{quantizer}",
+                    "cfg": deepcopy(bodies[fmt][quantizer]),
+                }
+            )
+    logger.info("Recipe resolved over %d Linears: %s", sum(counts.values()), counts)
+    return rules
+
+
+def ptq_with_recipe(model, calib_batches: list[dict], recipe: QuantRecipe):
+    """Mixed-precision PTQ driven by a per-layer recipe (fake quant).
+
+    Unlike ptq(), which applies one format everywhere, this honours the
+    sensitivity-searched plan: layers the search found tolerant go to NVFP4,
+    sensitive ones to FP8, and the most sensitive stay BF16. GROOT_SKIP_PATTERNS
+    are appended last so they win over the recipe -- the recipe was searched on
+    the same architecture, but those exclusions are deployment-path invariants
+    (no low-precision kernel exists for them in TRT/torchao), not tuning choices.
+    """
+    import modelopt.torch.quantization as mtq
+
+    _unregister_diffusers_attention()
+    cfg = deepcopy(mtq.NVFP4_DEFAULT_CFG)
+    cfg["quant_cfg"] = _recipe_rules(recipe, model) + [
+        {"quantizer_name": p, "enable": False} for p in GROOT_SKIP_PATTERNS
+    ]
+    model = mtq.quantize(model, cfg, lambda m: forward_loop(m, calib_batches))
+    n = _disable_non_linear_quantizers(model)
+    logger.info(
+        "PTQ (recipe: %s) done (%d non-Linear quantizers disabled):\n%s",
+        recipe.description or "unnamed",
+        n,
+        summarize_quantization(model),
+    )
+    return model
+
+
 def ptq(model, calib_batches: list[dict], fmt: str = "nvfp4"):
     """Uniform-format PTQ with calibration on real policy inputs (fake quant)."""
     import modelopt.torch.quantization as mtq
