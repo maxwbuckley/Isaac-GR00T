@@ -289,12 +289,82 @@ Variance halves, which matters more than the mean for a control loop. E2E is
 **not** significant (t = 1.75): a ~1 ms stage delta is unresolvable through E2E
 spread (sd 2.4-3.5 ms).
 
-**UNEXPLAINED:** the function-level saving is 4.10 ms but only 0.93 ms reaches
+**UNEXPLAINED:** the function-level saving is 4.10 ms but only ~0.95 ms reaches
 the stage. The stage timer does cover the collator (`prepare_model_inputs` calls
 both `processor(messages)` and `collate_fn`), so scope is not the answer.
 Untested candidates: the tight loop keeping tokenizer state in L1/L2 that real
 pipeline work evicts, or HF fast-tokenizer per-call overhead amplified under
-repetition. The defensible number is -10.8%, not -88.9%.
+repetition. The defensible number is the stage-level one, not -88.9%.
+
+### The data-processing stage is BIMODAL per process -- match states before comparing
+
+A 30-round rerun with a "low-variance" harness (core pinning, fixed thread
+counts, warmup 10->30, iterations 50->100) made variance **worse**: sd(d) went
+0.470 -> 1.945 ms (+314%). Cause is not drift (no trend, p=0.92 / 0.16, chip at
+42 C) but bimodality: each *process* lands in one of two states, ~5.1 ms or
+~8.6 ms on `main`, with almost nothing between (largest gap = 38-42% of the
+observed range, vs 19-23% for E2E, which is far less affected).
+
+**It is not CPU frequency.** Eight `main` runs with `scaling_cur_freq` sampled
+on the pinned cores split 4 slow / 4 fast with identical clocks:
+
+| data_ms | mean MHz | | data_ms | mean MHz |
+|---|---|---|---|---|
+| 8.68 | 1397 | | 4.95 | 1462 |
+| 8.29 | 1432 | | 5.41 | 1444 |
+| 8.40 | 1396 | | 5.18 | 1457 |
+| 8.67 | 1461 | | 5.08 | 1436 |
+
+The 8.6/5.1 = 1.69 ratio resembling the DVFS ratio 2601/1620 = 1.61 was a
+coincidence. The state reproduces within a single branch, so it is not a
+B4-vs-main artifact. **What the two states are is unknown.**
+
+Consequence for A/B work here: the arms can land in different state mixtures
+(B4 fast 27/30, main fast ~11/30 in that run), which inflates the naive delta.
+Restricting to rounds where both arms are in the fast state recovers the
+original answer:
+
+| Analysis | n | delta | sd | wins |
+|---|---|---|---|---|
+| Old harness | 10 | **+0.934 ms** | 0.470 | 10/10 |
+| New harness, state-matched | 11 | **+0.976 ms** | 0.614 | 10/11 |
+| New harness, naive (mixed states) | 30 | +2.473 ms | 1.945 | 28/30 |
+
+Two independent harnesses agree to within 0.04 ms once states are matched.
+**Check for bimodality before trusting a mean on this box**; a larger n does not
+help when the arms sample different mixtures.
+
+### E2E at n=30
+
+E2E is much less bimodal, so the full n=30 stands: **-2.097 ms (-1.4%),
+19/30 rounds, t=2.07, p=0.048**. This matches the earlier underpowered estimate
+(-2.040 ms) almost exactly.
+
+Note the E2E delta (~2.1 ms) exceeds the data-stage delta (~0.95 ms). That is
+consistent with B4's second optimization -- the fused host-to-device transfer in
+`Gr00tPolicy._get_action`, which lies outside the data-processing stage timer --
+contributing the remainder, but the two were never measured separately, so that
+attribution is inference rather than measurement.
+
+### Power analysis (paired t, exact noncentral t)
+
+From the old-harness variance, for the observed effects:
+
+| | dz | n for 80% power | n for 90% |
+|---|---|---|---|
+| Data stage | 1.985 | **5 rounds** (7 min) | 5 rounds |
+| E2E | 0.553 | **28 rounds** (38 min) | 37 rounds |
+
+At the n=10 originally run, E2E power was only **0.346** -- the non-significant
+result was never evidence of no effect. Minimum detectable effect at 80% power,
+n=30: ~0.19 ms (data stage), ~1.5 ms (E2E). Since n scales as sigma^2, halving
+E2E spread would cut the 28-round requirement to 9 -- variance reduction is the
+cheaper lever *if* it works, which here it did not.
+
+Caveat when computing this: `scipy.stats.nct` returns `nan` at moderate
+noncentrality (e.g. df=9, ncp=15.8), and `nan >= target` is False, which
+silently corrupts both a bisection and a smallest-n scan. Guard it -- the
+symptom is a non-monotonic MDE column.
 
 B4's own tests pass on Thor: 15 passed, 1 deselected (gpu).
 
